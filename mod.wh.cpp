@@ -581,9 +581,12 @@ static D2D1_RECT_F g_toolbarRect = { 0, 0, 0, 0 };
 static int g_hoveredToolbarBtn = -1;
 static bool g_isDraggingToolbar = false;
 static POINT g_toolbarDragStart = { 0, 0 };
+static POINT g_toolbarDragStartInit = { 0, 0 };
 static float g_toolbarCustomX = -1.0f;
 static float g_toolbarCustomY = -1.0f;
 static bool g_toolbarCollapsed = false;
+static bool g_isPillMouseDown = false;
+static bool g_isPillDragging = false;
 
 // Shapes Action Modal / Flyout State
 static bool g_shapesFlyoutOpen = false;
@@ -2302,12 +2305,45 @@ void DrawPenSizePreview(ID2D1HwndRenderTarget* pRT) {
         alpha = 1.0f - (float)(elapsed - 600) / 300.0f;
     }
 
-    ID2D1SolidColorBrush* pRing = nullptr;
-    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.85f * alpha), &pRing);
-    if (pRing) {
-        float r = g_currentPenWidth * 0.5f;
-        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), r, r), pRing, 1.5f);
-        pRing->Release();
+    // Determine current active tool width scaled by canvas zoom
+    float activeWidth = (g_currentTool == ToolMode::Highlighter) 
+        ? g_settings.defaultHighlighterWidth 
+        : g_settings.defaultPenWidth;
+    
+    // Scale screen radius by zoom so it exactly matches what appears on canvas
+    float screenRadius = std::max(1.0f, (activeWidth * g_zoomScale) * 0.5f);
+
+    // Ink fill with active color & tool opacity
+    D2D1_COLOR_F inkColor = g_activeColor;
+    if (g_currentTool == ToolMode::Highlighter) {
+        inkColor.a = 0.35f * alpha;
+    } else {
+        inkColor.a = std::min(1.0f, inkColor.a) * alpha;
+    }
+
+    ID2D1SolidColorBrush* pFillBrush = nullptr;
+    pRT->CreateSolidColorBrush(inkColor, &pFillBrush);
+
+    ID2D1SolidColorBrush* pRingBrush = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f * alpha), &pRingBrush);
+
+    ID2D1SolidColorBrush* pShadowBrush = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f * alpha), &pShadowBrush);
+
+    D2D1_ELLIPSE ell = D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), screenRadius, screenRadius);
+
+    if (pFillBrush) {
+        pRT->FillEllipse(ell, pFillBrush);
+        pFillBrush->Release();
+    }
+    // High-contrast dual-stroke border (subtle outer dark shadow + white ring) so it is visible on any background
+    if (pShadowBrush) {
+        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), screenRadius + 0.5f, screenRadius + 0.5f), pShadowBrush, 1.0f);
+        pShadowBrush->Release();
+    }
+    if (pRingBrush) {
+        pRT->DrawEllipse(ell, pRingBrush, 1.0f);
+        pRingBrush->Release();
     }
 }
 
@@ -2985,6 +3021,13 @@ void DrawColorFlyout(ID2D1HwndRenderTarget* pRT) {
             foundBtn = true;
             break;
         }
+    }
+    if (!foundBtn && g_toolbarCollapsed) {
+        btnAbsLeft = g_toolbarRect.left;
+        btnAbsTop = g_toolbarRect.top;
+        btnAbsRight = g_toolbarRect.right;
+        btnAbsBottom = g_toolbarRect.bottom;
+        foundBtn = true;
     }
     if (!foundBtn) return;
 
@@ -3992,6 +4035,12 @@ void SetToolMode(ToolMode newMode) {
     ToolMode oldMode = g_currentTool;
     g_currentTool = newMode;
 
+    if (newMode == ToolMode::Highlighter) {
+        g_currentPenWidth = g_settings.defaultHighlighterWidth;
+    } else if (newMode == ToolMode::Pen) {
+        g_currentPenWidth = g_settings.defaultPenWidth;
+    }
+
     if (g_hOverlayWnd) {
         if (newMode == ToolMode::Pointer) {
             // Enter Pointer (Click-Through) mode:
@@ -4232,6 +4281,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         overInteractive = true;
                     }
                 }
+                if (g_isPillMouseDown || g_isPillDragging || g_isDraggingToolbar) {
+                    overInteractive = true;
+                }
 
                 LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
                 if (overInteractive) {
@@ -4427,8 +4479,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 InvalidateOverlay();
                 return 0;
             }
-            g_settings.defaultPenWidth = std::max(1.0f, g_settings.defaultPenWidth - 1.0f);
-            g_currentPenWidth = g_settings.defaultPenWidth;
+            if (g_currentTool == ToolMode::Highlighter) {
+                g_settings.defaultHighlighterWidth = std::max(4.0f, g_settings.defaultHighlighterWidth - 2.0f);
+                g_currentPenWidth = g_settings.defaultHighlighterWidth;
+            } else {
+                g_settings.defaultPenWidth = std::max(1.0f, g_settings.defaultPenWidth - 1.0f);
+                g_currentPenWidth = g_settings.defaultPenWidth;
+            }
             g_sizePreviewTime = GetTickCount64();
             InvalidateOverlay();
             return 0;
@@ -4446,8 +4503,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 InvalidateOverlay();
                 return 0;
             }
-            g_settings.defaultPenWidth = std::min(60.0f, g_settings.defaultPenWidth + 1.0f);
-            g_currentPenWidth = g_settings.defaultPenWidth;
+            if (g_currentTool == ToolMode::Highlighter) {
+                g_settings.defaultHighlighterWidth = std::min(80.0f, g_settings.defaultHighlighterWidth + 2.0f);
+                g_currentPenWidth = g_settings.defaultHighlighterWidth;
+            } else {
+                g_settings.defaultPenWidth = std::min(60.0f, g_settings.defaultPenWidth + 1.0f);
+                g_currentPenWidth = g_settings.defaultPenWidth;
+            }
             g_sizePreviewTime = GetTickCount64();
             InvalidateOverlay();
             return 0;
@@ -4518,12 +4580,30 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        // Toolbar Dragging
-        if (g_toolbarCollapsed && GetCapture() == hwnd && !g_isDraggingToolbar) {
-            if (DistanceSq(g_cursorX, g_cursorY, (float)g_toolbarDragStart.x, (float)g_toolbarDragStart.y) > 16.0f) {
-                g_isDraggingToolbar = true;
+        // Collapsed Pill Dragging
+        if (g_isPillMouseDown) {
+            if (!g_isPillDragging) {
+                if (DistanceSq(g_cursorX, g_cursorY, (float)g_toolbarDragStartInit.x, (float)g_toolbarDragStartInit.y) > 16.0f) {
+                    g_isPillDragging = true;
+                }
             }
+            if (g_isPillDragging) {
+                float dx = g_cursorX - g_toolbarDragStart.x;
+                float dy = g_cursorY - g_toolbarDragStart.y;
+                g_toolbarCustomX = g_toolbarRect.left + dx;
+                g_toolbarCustomY = g_toolbarRect.top + dy;
+                g_toolbarDragStart = { (LONG)g_cursorX, (LONG)g_cursorY };
+
+                int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                BuildToolbarLayout(vw, vh);
+                InvalidateOverlay();
+                return 0;
+            }
+            return 0;
         }
+
+        // Expanded Toolbar Dragging
         if (g_isDraggingToolbar) {
             float dx = g_cursorX - g_toolbarDragStart.x;
             float dy = g_cursorY - g_toolbarDragStart.y;
@@ -4956,12 +5036,23 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
             }
             else if (g_radialHoverTarget == RadialTarget::RecentHub) {
-                g_colorFlyoutOpen = !g_colorFlyoutOpen;
+                int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                if (g_toolbarCollapsed) {
+                    g_toolbarCollapsed = false;
+                    float pillCenterX = (g_toolbarRect.left + g_toolbarRect.right) * 0.5f;
+                    g_toolbarCustomX = pillCenterX - 425.0f;
+                    if (g_toolbarCustomX < 10.0f) g_toolbarCustomX = 10.0f;
+                    if (g_toolbarCustomX + 850.0f > (float)vw - 10.0f) g_toolbarCustomX = (float)vw - 850.0f - 10.0f;
+                    g_colorFlyoutOpen = true;
+                } else {
+                    g_colorFlyoutOpen = !g_colorFlyoutOpen;
+                }
                 g_shapesFlyoutOpen = false;
                 g_gridFlyoutOpen = false;
                 g_activeColor = g_customColor.activeColor;
                 SetToolMode(ToolMode::Pen);
-                BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+                BuildToolbarLayout(vw, vh);
             }
 
             g_radialActive = false;
@@ -5258,14 +5349,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_toolbarCollapsed && g_settings.showBottomToolbar &&
             x >= g_toolbarRect.left && x <= g_toolbarRect.right &&
             y >= g_toolbarRect.top && y <= g_toolbarRect.bottom) {
-            g_isDraggingToolbar = false;
+            g_isPillMouseDown = true;
+            g_isPillDragging = false;
             g_toolbarDragStart = { (LONG)x, (LONG)y };
+            g_toolbarDragStartInit = { (LONG)x, (LONG)y };
             SetCapture(hwnd);
             return 0;
         }
 
-        // Toolbar Drag Handle Check
-        if (g_hoveredToolbarBtn == 0 || (x >= g_toolbarRect.left && x <= g_toolbarRect.right && y >= g_toolbarRect.top && y <= g_toolbarRect.bottom && g_hoveredToolbarBtn == -1)) {
+        // Toolbar Drag Handle Check (Expanded mode only)
+        if (!g_toolbarCollapsed && (g_hoveredToolbarBtn == 0 || (x >= g_toolbarRect.left && x <= g_toolbarRect.right && y >= g_toolbarRect.top && y <= g_toolbarRect.bottom && g_hoveredToolbarBtn == -1))) {
             g_isDraggingToolbar = true;
             g_toolbarDragStart = { (LONG)x, (LONG)y };
             SetCapture(hwnd);
@@ -5540,10 +5633,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        if (g_toolbarCollapsed && GetCapture() == hwnd) {
+        if (g_isPillMouseDown) {
             ReleaseCapture();
-            if (!g_isDraggingToolbar) {
-                // Click on collapsed pill: Expand!
+            float distFromInitSq = DistanceSq((float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam), (float)g_toolbarDragStartInit.x, (float)g_toolbarDragStartInit.y);
+            bool wasDragging = g_isPillDragging || (distFromInitSq > 16.0f);
+            g_isPillMouseDown = false;
+            g_isPillDragging = false;
+
+            if (!wasDragging) {
+                // Click on collapsed pill without dragging: Expand!
                 g_toolbarCollapsed = false;
                 float pillCenterX = (g_toolbarRect.left + g_toolbarRect.right) * 0.5f;
                 int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -5554,9 +5652,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 BuildToolbarLayout(vw, vh);
                 ShowToastNotification(L"Toolbar Expanded");
                 InvalidateOverlay();
-                return 0;
             }
-            g_isDraggingToolbar = false;
             return 0;
         }
 
@@ -5646,10 +5742,26 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    case WM_CAPTURECHANGED: {
+        g_isPillMouseDown = false;
+        g_isPillDragging = false;
+        g_isDraggingToolbar = false;
+        g_isPanning = false;
+        g_isDrawing = false;
+        g_isLaserDrawing = false;
+        g_isLeftClickErasing = false;
+        g_isSnippingDrag = false;
+        g_pickerDrag = ColorPickerDrag::None;
+        return 0;
+    }
+
     case WM_NCHITTEST: {
         if (g_currentTool == ToolMode::Pointer) {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
+            if (g_isPillMouseDown || g_isPillDragging || g_isDraggingToolbar) {
+                return HTCLIENT;
+            }
             if (g_shapesFlyoutOpen &&
                 pt.x >= g_shapesFlyoutRect.left && pt.x <= g_shapesFlyoutRect.right &&
                 pt.y >= g_shapesFlyoutRect.top && pt.y <= g_shapesFlyoutRect.bottom) {
@@ -5789,6 +5901,9 @@ void ShowOverlay() {
     g_radialHoverTarget = RadialTarget::None;
     g_radialHoverSector = -1;
     g_hoveredOrb = -1;
+    g_isPillMouseDown = false;
+    g_isPillDragging = false;
+    g_isDraggingToolbar = false;
     g_isDrawing = false;
     g_isPanning = false;
     g_isRightMouseDown = false;
@@ -5841,6 +5956,9 @@ void HideOverlay() {
     g_hoveredRecentSwatch = -1;
     g_hoveredColorStudioAction = -1;
     g_radialActive = false;
+    g_isPillMouseDown = false;
+    g_isPillDragging = false;
+    g_isDraggingToolbar = false;
     g_isDrawing = false;
     g_isPanning = false;
     g_isRightMouseDown = false;
@@ -5850,6 +5968,9 @@ void HideOverlay() {
     g_wheelUsedWhileRightMouseDown = false;
 
     if (g_hOverlayWnd) {
+        if (GetCapture() == g_hOverlayWnd) {
+            ReleaseCapture();
+        }
         KillTimer(g_hOverlayWnd, 1);
         KillTimer(g_hOverlayWnd, 2);
         LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
@@ -6160,6 +6281,7 @@ BOOL Wh_ModInit() {
     Wh_Log(L"WinDraw: Initializing");
 
     LoadSettings();
+    g_currentPenWidth = (g_currentTool == ToolMode::Highlighter) ? g_settings.defaultHighlighterWidth : g_settings.defaultPenWidth;
 
     CoInitialize(NULL);
 
@@ -6362,6 +6484,7 @@ void Wh_ModUninit() {
 void Wh_ModSettingsChanged() {
     Wh_Log(L"WinDraw: Settings Changed");
     LoadSettings();
+    g_currentPenWidth = (g_currentTool == ToolMode::Highlighter) ? g_settings.defaultHighlighterWidth : g_settings.defaultPenWidth;
 
     if (g_hHotkeyWnd) {
         UnregisterHotKey(g_hHotkeyWnd, kHotkeyId);

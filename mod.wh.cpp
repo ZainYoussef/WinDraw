@@ -6,7 +6,7 @@
 // @author          Zain
 // @github          https://github.com/ZainYoussef/WinDraw
 // @include         explorer.exe
-// @compilerOptions -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ldwmapi -lcomctl32 -lshlwapi -lwindowscodecs
+// @compilerOptions -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ldwmapi -lcomctl32 -lshlwapi -lwindowscodecs -lshell32
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -82,6 +82,9 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 - showBottomToolbar: true
   $name: Show Bottom Toolbar
   $description: Display floating compact toolbar on the overlay
+- showTrayIcon: true
+  $name: Show System Tray Icon
+  $description: Display a PenWorkspace icon in the Windows taskbar notification area to quickly toggle WinDraw and access quick controls
 - cornerRadius: 5
   $name: Toolbar Corner Radius
   $description: Corner radius for Windows 11 Fluent look (default 5px)
@@ -109,6 +112,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 #include <dwmapi.h>
 #include <wincodec.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <vector>
 #include <cmath>
 #include <string>
@@ -123,6 +127,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "shell32.lib")
 
 // ----------------------------------------------------------------------------
 // Configuration & Settings
@@ -134,6 +139,7 @@ struct ModSettings {
     float defaultPenWidth;
     float defaultHighlighterWidth;
     bool showBottomToolbar;
+    bool showTrayIcon;
     int cornerRadius;
     bool autoSaveSnapshot;
     bool freezeScreen;
@@ -153,6 +159,7 @@ void LoadSettings() {
     if (g_settings.defaultHighlighterWidth <= 1.0f) g_settings.defaultHighlighterWidth = 18.0f;
 
     g_settings.showBottomToolbar = Wh_GetIntSetting(L"showBottomToolbar") != 0;
+    g_settings.showTrayIcon = Wh_GetIntSetting(L"showTrayIcon") != 0;
     g_settings.cornerRadius = Wh_GetIntSetting(L"cornerRadius");
     if (g_settings.cornerRadius <= 0) g_settings.cornerRadius = 5;
 
@@ -446,6 +453,36 @@ static ULONGLONG g_sizePreviewTime = 0;
 static ULONGLONG g_zoomPreviewTime = 0;
 
 #define WM_USER_TOGGLE_POINTER (WM_USER + 101)
+#define WM_USER_TRAYICON       (WM_USER + 102)
+#define WM_USER_UPDATE_TRAY    (WM_USER + 103)
+
+// ----------------------------------------------------------------------------
+// System Tray Notification Icon State & Helpers
+// ----------------------------------------------------------------------------
+
+static const UINT kTrayIconId = 1001;
+static UINT g_wmTaskbarCreated = 0;
+static NOTIFYICONDATAW g_nid = { sizeof(NOTIFYICONDATAW) };
+static bool g_bTrayIconVisible = false;
+static HICON g_hTrayIcon = NULL;
+static ULONGLONG g_lastOverlayOpenTime = 0;
+
+bool IsClickOnTrayIcon() {
+    if (!g_settings.showTrayIcon || !g_bTrayIconVisible || !g_hHotkeyWnd) return false;
+    if (GetTickCount64() - g_lastOverlayOpenTime < 300) return false;
+
+    NOTIFYICONIDENTIFIER nid = { sizeof(NOTIFYICONIDENTIFIER) };
+    nid.hWnd = g_hHotkeyWnd;
+    nid.uID = kTrayIconId;
+    RECT rc = { 0 };
+    if (SUCCEEDED(Shell_NotifyIconGetRect(&nid, &rc))) {
+        POINT pt;
+        GetCursorPos(&pt);
+        return (pt.x >= (rc.left - 6) && pt.x <= (rc.right + 6) &&
+                pt.y >= (rc.top - 6) && pt.y <= (rc.bottom + 6));
+    }
+    return false;
+}
 
 // ----------------------------------------------------------------------------
 // Forward Declarations
@@ -463,6 +500,8 @@ void CopySnapshotToClipboard();
 void EraseBrushAt(float x, float y, float radius);
 bool EraseWholeShapeAt(float x, float y, float radius);
 void SaveBitmapToPNG(HBITMAP hBitmap, const std::wstring& filePath);
+void UpdateTrayIcon(HWND hwnd);
+void RemoveTrayIcon();
 
 // ----------------------------------------------------------------------------
 // Utility Math & Geometry
@@ -1162,6 +1201,10 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
             }
         }
         else {
+            bool isDisabled = (btn.id == 11 && g_undoStack.empty()) ||
+                              (btn.id == 12 && g_redoStack.empty()) ||
+                              (btn.id == 13 && g_strokes.empty());
+
             // Determine active highlight
             bool isToolActive = false;
             if (btn.id == 1 && g_currentTool == ToolMode::Highlighter) isToolActive = true;
@@ -1175,7 +1218,7 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
             if (btn.id == 23 && g_currentShape == ShapeType::Rectangle) isToolActive = true;
             if (btn.id == 24 && g_currentShape == ShapeType::Ellipse) isToolActive = true;
 
-            if (isToolActive || isHovered) {
+            if (!isDisabled && (isToolActive || isHovered)) {
                 ID2D1SolidColorBrush* pHoverBg = nullptr;
                 pRT->CreateSolidColorBrush(isToolActive ? D2D1::ColorF(0.20f, 0.32f, 0.44f, 0.95f) : D2D1::ColorF(0.18f, 0.22f, 0.30f, 0.85f), &pHoverBg);
                 if (pHoverBg) {
@@ -1186,8 +1229,11 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
 
             // Draw label / icon
             if (g_pIconFormat && !btn.label.empty()) {
-                ID2D1SolidColorBrush* pLblBrush = isToolActive ? nullptr : pTextBrush;
-                if (isToolActive) {
+                ID2D1SolidColorBrush* pLblBrush = nullptr;
+                if (isDisabled) {
+                    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.44f, 0.52f, 0.38f), &pLblBrush);
+                }
+                else if (isToolActive) {
                     pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.90f, 0.75f, 1.0f), &pLblBrush);
                 }
                 const wchar_t* iconText = (btn.id == 5) ? (g_inkVisible ? L"\uE890" : L"\uED1A") : btn.label.c_str();
@@ -1196,10 +1242,10 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                     (UINT32)wcslen(iconText),
                     g_pIconFormat,
                     btn.rect,
-                    pLblBrush,
+                    pLblBrush ? pLblBrush : pTextBrush,
                     D2D1_DRAW_TEXT_OPTIONS_NONE
                 );
-                if (isToolActive && pLblBrush) pLblBrush->Release();
+                if (pLblBrush) pLblBrush->Release();
             }
         }
     }
@@ -1254,11 +1300,15 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
 
     // 3. Draw Hovered Sector Highlight
     if (g_radialHoverSector >= 0 && g_radialHoverSector < 8) {
-        float secAngle = (float)(g_radialHoverSector * (3.14159265358979323846 / 4.0));
-        float hx = cx + std::cos(secAngle) * kActionIconR;
-        float hy = cy + std::sin(secAngle) * kActionIconR;
-        pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 20.0f, 20.0f), pHoverBrush);
-        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 20.0f, 20.0f), pGlowBrush, 1.5f);
+        bool secDisabled = (g_radialHoverSector == 0 && g_strokes.empty()) ||
+                           (g_radialHoverSector == 3 && g_undoStack.empty());
+        if (!secDisabled) {
+            float secAngle = (float)(g_radialHoverSector * (3.14159265358979323846 / 4.0));
+            float hx = cx + std::cos(secAngle) * kActionIconR;
+            float hy = cy + std::sin(secAngle) * kActionIconR;
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 20.0f, 20.0f), pHoverBrush);
+            pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 20.0f, 20.0f), pGlowBrush, 1.5f);
+        }
     }
 
     // 4. Draw the 8 Sector Action Icons
@@ -1278,15 +1328,23 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
         float ix = cx + std::cos(secAngle) * kActionIconR;
         float iy = cy + std::sin(secAngle) * kActionIconR;
 
+        bool isSecDisabled = (k == 0 && g_strokes.empty()) ||
+                             (k == 3 && g_undoStack.empty());
+
         D2D1_RECT_F iconRect = D2D1::RectF(ix - 16.0f, iy - 16.0f, ix + 16.0f, iy + 16.0f);
         if (g_pRadialIconFormat) {
+            ID2D1SolidColorBrush* pIconBrush = nullptr;
+            if (isSecDisabled) {
+                pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.44f, 0.52f, 0.38f), &pIconBrush);
+            }
             pRT->DrawText(
                 sectorIcons[k], (UINT32)wcslen(sectorIcons[k]),
                 g_pRadialIconFormat,
                 iconRect,
-                pTextBrush,
+                pIconBrush ? pIconBrush : pTextBrush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE
             );
+            if (pIconBrush) pIconBrush->Release();
         }
     }
 
@@ -2145,8 +2203,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 float angle = std::atan2(dy, dx);
                 if (angle < 0) angle += 2.0f * 3.14159265f;
                 int sector = (int)((angle + 3.14159265f / 8.0f) / (3.14159265f / 4.0f)) % 8;
-                g_radialHoverSector = sector;
-                g_radialHoverTarget = (RadialTarget)sector;
+                bool sectorDisabled = (sector == (int)RadialTarget::Clear && g_strokes.empty()) ||
+                                      (sector == (int)RadialTarget::Undo && g_undoStack.empty());
+                if (!sectorDisabled) {
+                    g_radialHoverSector = sector;
+                    g_radialHoverTarget = (RadialTarget)sector;
+                }
             }
             else if (dist >= 110.0f && dist <= 146.0f) {
                 const float kOrbitalRadius = 126.0f;
@@ -2254,6 +2316,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         float x = (float)GET_X_LPARAM(lParam);
         float y = (float)GET_Y_LPARAM(lParam);
 
+        // Clicking the tray icon while WinDraw is open closes WinDraw
+        if (IsClickOnTrayIcon()) {
+            HideOverlay();
+            return 0;
+        }
+
         // Radial Menu selection
         if (g_radialActive) {
             if (g_radialHoverTarget == RadialTarget::Center) {
@@ -2273,11 +2341,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetToolMode(ToolMode::Eraser);
             }
             else if (g_radialHoverTarget == RadialTarget::Undo) {
-                if (!g_undoStack.empty()) {
-                    g_redoStack.push_back(std::move(g_strokes));
-                    g_strokes = std::move(g_undoStack.back());
-                    g_undoStack.pop_back();
-                }
+                PerformUndo();
             }
             else if (g_radialHoverTarget == RadialTarget::Pointer) {
                 SetToolMode(ToolMode::Pointer);
@@ -2327,6 +2391,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         if (g_hoveredToolbarBtn >= 0 && g_hoveredToolbarBtn < (int)g_toolbarButtons.size()) {
             const auto& btn = g_toolbarButtons[g_hoveredToolbarBtn];
+            if (!btn.isPen) {
+                if ((btn.id == 11 && g_undoStack.empty()) ||
+                    (btn.id == 12 && g_redoStack.empty()) ||
+                    (btn.id == 13 && g_strokes.empty())) {
+                    return 0;
+                }
+            }
             if (btn.isPen) {
                 g_activeColor = btn.penColor;
                 SetToolMode(ToolMode::Pen);
@@ -2617,6 +2688,20 @@ void ShowOverlay() {
 
     BuildToolbarLayout(vw, vh);
 
+    g_radialActive = false;
+    g_radialHoverTarget = RadialTarget::None;
+    g_radialHoverSector = -1;
+    g_hoveredOrb = -1;
+    g_isDrawing = false;
+    g_isPanning = false;
+    g_isRightMouseDown = false;
+    g_isRightClickErasing = false;
+    g_isLeftClickErasing = false;
+    g_isRightClickClearing = false;
+    g_wheelUsedWhileRightMouseDown = false;
+    g_hoveredToolbarBtn = -1;
+    g_lastOverlayOpenTime = GetTickCount64();
+
     ShowWindow(g_hOverlayWnd, SW_SHOW);
     SetForegroundWindow(g_hOverlayWnd);
     SetFocus(g_hOverlayWnd);
@@ -2654,12 +2739,236 @@ void HideOverlay() {
 }
 
 // ----------------------------------------------------------------------------
-// Hotkey Background Message Loop
+// System Tray Notification Icon (PenWorkspace \uEDC6)
+// ----------------------------------------------------------------------------
+
+HICON CreateGlyphIcon(WCHAR glyph, int size) {
+    if (!g_pWICFactory || !g_pD2DFactory || !g_pDWriteFactory || size <= 0) return NULL;
+
+    IWICBitmap* pWicBitmap = nullptr;
+    HRESULT hr = g_pWICFactory->CreateBitmap(size, size, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand, &pWicBitmap);
+    if (FAILED(hr) || !pWicBitmap) return NULL;
+
+    D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f
+    );
+
+    ID2D1RenderTarget* pRT = nullptr;
+    hr = g_pD2DFactory->CreateWicBitmapRenderTarget(pWicBitmap, rtProps, &pRT);
+    if (FAILED(hr) || !pRT) {
+        pWicBitmap->Release();
+        return NULL;
+    }
+
+    pRT->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+    const wchar_t* fontName = GetIconFontFamilyName();
+    float fontSize = (float)size * 0.90f;
+    IDWriteTextFormat* pFormat = nullptr;
+    g_pDWriteFactory->CreateTextFormat(
+        fontName,
+        NULL,
+        DWRITE_FONT_WEIGHT_BOLD,
+        DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        fontSize,
+        L"en-us",
+        &pFormat
+    );
+
+    if (pFormat) {
+        pFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        pFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+
+    ID2D1SolidColorBrush* pBrush = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &pBrush);
+
+    pRT->BeginDraw();
+    pRT->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+    if (pFormat && pBrush) {
+        WCHAR str[2] = { glyph, 0 };
+        pRT->DrawTextW(str, 1, pFormat, D2D1::RectF(0, 0, (float)size, (float)size), pBrush);
+    }
+
+    hr = pRT->EndDraw();
+
+    if (pBrush) pBrush->Release();
+    if (pFormat) pFormat->Release();
+    pRT->Release();
+
+    HICON hIcon = NULL;
+    IWICBitmapLock* pLock = nullptr;
+    WICRect rc = { 0, 0, size, size };
+    if (SUCCEEDED(pWicBitmap->Lock(&rc, WICBitmapLockRead, &pLock))) {
+        UINT bufferSize = 0;
+        BYTE* pBytes = nullptr;
+        if (SUCCEEDED(pLock->GetDataPointer(&bufferSize, &pBytes)) && pBytes) {
+            BITMAPV5HEADER bi = { sizeof(BITMAPV5HEADER) };
+            bi.bV5Width = size;
+            bi.bV5Height = -size; // top-down
+            bi.bV5Planes = 1;
+            bi.bV5BitCount = 32;
+            bi.bV5Compression = BI_BITFIELDS;
+            bi.bV5RedMask   = 0x00FF0000;
+            bi.bV5GreenMask = 0x0000FF00;
+            bi.bV5BlueMask  = 0x000000FF;
+            bi.bV5AlphaMask = 0xFF000000;
+
+            HDC hdcScreen = GetDC(NULL);
+            void* pDIBBits = nullptr;
+            HBITMAP hColorBitmap = CreateDIBSection(hdcScreen, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &pDIBBits, NULL, 0);
+            ReleaseDC(NULL, hdcScreen);
+
+            if (hColorBitmap && pDIBBits) {
+                memcpy(pDIBBits, pBytes, size * size * 4);
+
+                HBITMAP hMonoMask = CreateBitmap(size, size, 1, 1, NULL);
+                if (hMonoMask) {
+                    ICONINFO ii = { 0 };
+                    ii.fIcon = TRUE;
+                    ii.xHotspot = 0;
+                    ii.yHotspot = 0;
+                    ii.hbmMask = hMonoMask;
+                    ii.hbmColor = hColorBitmap;
+
+                    hIcon = CreateIconIndirect(&ii);
+                    DeleteObject(hMonoMask);
+                }
+                DeleteObject(hColorBitmap);
+            }
+        }
+        pLock->Release();
+    }
+
+    pWicBitmap->Release();
+    return hIcon;
+}
+
+void RemoveTrayIcon() {
+    if (g_bTrayIconVisible) {
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        g_bTrayIconVisible = false;
+    }
+    if (g_hTrayIcon) {
+        DestroyIcon(g_hTrayIcon);
+        g_hTrayIcon = NULL;
+    }
+}
+
+void UpdateTrayIcon(HWND hwnd) {
+    if (!g_settings.showTrayIcon) {
+        RemoveTrayIcon();
+        return;
+    }
+
+    if (!hwnd) return;
+
+    if (!g_hTrayIcon) {
+        int iconSize = GetSystemMetrics(SM_CXSMICON);
+        if (iconSize <= 0) iconSize = 16;
+        g_hTrayIcon = CreateGlyphIcon(0xEDC6, iconSize);
+    }
+
+    ZeroMemory(&g_nid, sizeof(g_nid));
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hwnd;
+    g_nid.uID = kTrayIconId;
+    g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    g_nid.uCallbackMessage = WM_USER_TRAYICON;
+    g_nid.hIcon = g_hTrayIcon;
+    wcscpy_s(g_nid.szTip, L"WinDraw - Screen Inking & Annotation (Ctrl+Alt+G)");
+
+    if (!g_bTrayIconVisible) {
+        if (Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+            g_bTrayIconVisible = true;
+        }
+    }
+    else {
+        Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Hotkey & Tray Background Message Loop
 // ----------------------------------------------------------------------------
 
 static const int kHotkeyId = 1042;
 
 LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (g_wmTaskbarCreated && msg == g_wmTaskbarCreated) {
+        g_bTrayIconVisible = false;
+        UpdateTrayIcon(hwnd);
+        return 0;
+    }
+
+    if (msg == WM_USER_UPDATE_TRAY) {
+        UpdateTrayIcon(hwnd);
+        return 0;
+    }
+
+    if (msg == WM_USER_TRAYICON) {
+        UINT uMsg = LOWORD(lParam);
+        static ULONGLONG s_lastTrayClickTime = 0;
+
+        if (uMsg == WM_LBUTTONUP) {
+            ULONGLONG now = GetTickCount64();
+            if (now - s_lastTrayClickTime < 250) return 0; // Debounce duplicate events
+            s_lastTrayClickTime = now;
+
+            if (g_bIsActive) {
+                HideOverlay();
+            }
+            else {
+                ShowOverlay();
+            }
+            return 0;
+        }
+        else if (uMsg == WM_RBUTTONUP) {
+            POINT pt;
+            GetCursorPos(&pt);
+            HMENU hMenu = CreatePopupMenu();
+            if (hMenu) {
+                AppendMenuW(hMenu, MF_STRING, 1, g_bIsActive ? L"Hide WinDraw\t(ESC)" : L"Open WinDraw\t(Ctrl+Alt+G)");
+                SetMenuDefaultItem(hMenu, 1, FALSE);
+                AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenuW(hMenu, MF_STRING, 2, L"Take Snapshot\t(Ctrl+S)");
+                UINT clearFlags = (g_bIsActive && !g_strokes.empty()) ? MF_STRING : (MF_STRING | MF_GRAYED | MF_DISABLED);
+                AppendMenuW(hMenu, clearFlags, 3, L"Clear Canvas\t(C)");
+                AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenuW(hMenu, MF_STRING, 4, L"Dismiss Overlay");
+
+                SetForegroundWindow(hwnd);
+                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+                PostMessageW(hwnd, WM_NULL, 0, 0);
+                DestroyMenu(hMenu);
+
+                if (cmd == 1) {
+                    if (g_bIsActive) HideOverlay();
+                    else ShowOverlay();
+                }
+                else if (cmd == 2) {
+                    CopySnapshotToClipboard();
+                }
+                else if (cmd == 3) {
+                    if (g_bIsActive && !g_strokes.empty()) {
+                        PushUndoState();
+                        g_strokes.clear();
+                        InvalidateOverlay();
+                    }
+                }
+                else if (cmd == 4) {
+                    HideOverlay();
+                }
+            }
+            return 0;
+        }
+        return 0;
+    }
+
     if (msg == WM_HOTKEY && wParam == kHotkeyId) {
         if (g_bIsActive) {
             // Toggling hotkey while active switches between click-through Mouse Pointer and Inking
@@ -2678,6 +2987,8 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
 DWORD WINAPI HotkeyThread(LPVOID) {
     CoInitialize(NULL);
 
+    g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
     wc.lpfnWndProc = HotkeyWndProc;
     wc.hInstance = GetModuleHandleW(NULL);
@@ -2685,12 +2996,14 @@ DWORD WINAPI HotkeyThread(LPVOID) {
     RegisterClassExW(&wc);
 
     g_hHotkeyWnd = CreateWindowExW(
-        0, wc.lpszClassName, L"HotkeyReceiver",
-        0, 0, 0, 0, 0,
-        HWND_MESSAGE, NULL, wc.hInstance, NULL
+        0, wc.lpszClassName, L"WinDrawTrayReceiver",
+        WS_POPUP, 0, 0, 0, 0,
+        NULL, NULL, wc.hInstance, NULL
     );
 
     RegisterHotKey(g_hHotkeyWnd, kHotkeyId, g_settings.hotkeyMod, g_settings.hotkeyKey);
+
+    UpdateTrayIcon(g_hHotkeyWnd);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
@@ -2698,6 +3011,7 @@ DWORD WINAPI HotkeyThread(LPVOID) {
         DispatchMessage(&msg);
     }
 
+    RemoveTrayIcon();
     UnregisterHotKey(g_hHotkeyWnd, kHotkeyId);
     DestroyWindow(g_hHotkeyWnd);
     g_hHotkeyWnd = NULL;
@@ -2748,14 +3062,14 @@ BOOL Wh_ModInit() {
             g_pTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
 
-        // Toolbar Icon Format (15.0f Segoe Fluent Icons)
+        // Toolbar Icon Format (16.0f Segoe Fluent Icons)
         g_pDWriteFactory->CreateTextFormat(
             iconFont,
             NULL,
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            15.0f,
+            16.0f,
             L"en-us",
             &g_pIconFormat
         );
@@ -2764,14 +3078,14 @@ BOOL Wh_ModInit() {
             g_pIconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
 
-        // Radial Menu Icon Format (17.0f Segoe Fluent Icons)
+        // Radial Menu Icon Format (18.0f Segoe Fluent Icons)
         g_pDWriteFactory->CreateTextFormat(
             iconFont,
             NULL,
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            17.0f,
+            18.0f,
             L"en-us",
             &g_pRadialIconFormat
         );
@@ -2813,6 +3127,7 @@ BOOL Wh_ModInit() {
 void Wh_ModUninit() {
     Wh_Log(L"WinDraw: Unloading");
 
+    RemoveTrayIcon();
     HideOverlay();
 
     if (g_hHotkeyWnd) {
@@ -2856,5 +3171,6 @@ void Wh_ModSettingsChanged() {
     if (g_hHotkeyWnd) {
         UnregisterHotKey(g_hHotkeyWnd, kHotkeyId);
         RegisterHotKey(g_hHotkeyWnd, kHotkeyId, g_settings.hotkeyMod, g_settings.hotkeyKey);
+        PostMessageW(g_hHotkeyWnd, WM_USER_UPDATE_TRAY, 0, 0);
     }
 }

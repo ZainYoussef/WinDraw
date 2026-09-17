@@ -188,6 +188,18 @@ enum class ToolMode {
     Pointer
 };
 
+enum class GridStyle {
+    None = 0,
+    DotGrid = 1,
+    GraphLines = 2
+};
+
+enum class GridDensity {
+    Fine = 24,       // 24 px spacing (tight)
+    Medium = 48,     // 48 px spacing (standard)
+    Coarse = 96      // 96 px spacing (broad)
+};
+
 struct StrokePoint {
     float x;
     float y;
@@ -452,6 +464,14 @@ static bool g_shapesFlyoutOpen = false;
 static D2D1_RECT_F g_shapesFlyoutRect = { 0, 0, 0, 0 };
 static int g_hoveredShapeFlyoutItem = -1;
 
+// Grid Overlay & Action Modal State
+static GridStyle g_gridStyle = GridStyle::None;
+static GridDensity g_gridDensity = GridDensity::Medium;
+static ID2D1BitmapBrush* g_pGridBrush = nullptr;
+static bool g_gridFlyoutOpen = false;
+static D2D1_RECT_F g_gridFlyoutRect = { 0, 0, 0, 0 };
+static int g_hoveredGridFlyoutItem = -1;
+
 // Toast feedback
 static ULONGLONG g_toastStartTime = 0;
 static std::wstring g_toastMessage = L"";
@@ -525,6 +545,8 @@ void CancelSnipping();
 void SaveCroppedSnapshot(int left, int top, int width, int height);
 void DrawSnippingOverlay(ID2D1HwndRenderTarget* pRT);
 void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT);
+void RebuildGridBrush();
+void DrawGridFlyout(ID2D1HwndRenderTarget* pRT);
 
 // ----------------------------------------------------------------------------
 // Utility Math & Geometry
@@ -700,6 +722,10 @@ HRESULT CreateD2DResources(HWND hwnd) {
             g_pRenderTarget->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1.0f), &g_pStrokeBrush);
         }
 
+        if (g_gridStyle != GridStyle::None) {
+            RebuildGridBrush();
+        }
+
         CaptureDesktop();
     }
 
@@ -707,6 +733,7 @@ HRESULT CreateD2DResources(HWND hwnd) {
 }
 
 void ReleaseD2DResources() {
+    if (g_pGridBrush) { g_pGridBrush->Release(); g_pGridBrush = nullptr; }
     if (g_pStrokeBrush) { g_pStrokeBrush->Release(); g_pStrokeBrush = nullptr; }
     if (g_pDesktopBitmap) { g_pDesktopBitmap->Release(); g_pDesktopBitmap = nullptr; }
     if (g_pRoundStrokeStyle) { g_pRoundStrokeStyle->Release(); g_pRoundStrokeStyle = nullptr; }
@@ -814,16 +841,17 @@ void BuildToolbarLayout(int screenW, int screenH) {
     g_toolbarDividers.push_back(curX + dividerGap * 0.5f);
     curX += dividerGap;
 
-    // Group 3: Navigation Tools (Highlighter, Eraser, Pan, Pointer, Eye)
-    int toolIds[] = { 1, 2, 3, 4, 5 };
+    // Group 3: Navigation Tools (Highlighter, Eraser, Pan, Pointer, Eye, Grid)
+    int toolIds[] = { 1, 2, 3, 4, 5, 6 };
     const wchar_t* toolLabels[] = {
         L"\uE7E6", // Highlighter (Highlight)
         L"\uE75C", // Eraser (EraseTool)
         L"\uE7C2", // Pan (Move - 4-way arrows)
         L"\uE7C9", // Pointer (TouchPointer)
-        L"\uE890"  // Eye (View)
+        L"\uE890", // Eye (View)
+        L"#"       // Grid (drawn as vector grid icon)
     };
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         ToolbarButton btn;
         btn.id = toolIds[i];
         btn.isPen = false;
@@ -1315,6 +1343,7 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
             if (btn.id == 5 && !g_inkVisible) isToolActive = true; // Eye closed
             if (btn.id == 20 && g_currentShape == ShapeType::Freehand && g_currentTool == ToolMode::Pen) isToolActive = true;
             if (btn.id == 25 && (g_shapesFlyoutOpen || (g_currentShape != ShapeType::Freehand && g_currentTool == ToolMode::Pen))) isToolActive = true;
+            if (btn.id == 6 && (g_gridFlyoutOpen || g_gridStyle != GridStyle::None)) isToolActive = true;
 
             if (!isDisabled && (isToolActive || isHovered)) {
                 ID2D1SolidColorBrush* pHoverBg = nullptr;
@@ -1334,20 +1363,49 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                 else if (isToolActive) {
                     pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.90f, 0.75f, 1.0f), &pLblBrush);
                 }
-                const wchar_t* iconText = (btn.id == 5) ? (g_inkVisible ? L"\uE890" : L"\uED1A") : btn.label.c_str();
-                pRT->DrawText(
-                    iconText,
-                    (UINT32)wcslen(iconText),
-                    g_pIconFormat,
-                    btn.rect,
-                    pLblBrush ? pLblBrush : pTextBrush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE
-                );
+                ID2D1SolidColorBrush* pDrawBrush = pLblBrush ? pLblBrush : pTextBrush;
+                if (btn.id == 25 && g_currentShape == ShapeType::Triangle) {
+                    float cx = (btn.rect.left + btn.rect.right) * 0.5f;
+                    float cy = (btn.rect.top + btn.rect.bottom) * 0.5f - 1.0f;
+                    float triH = 12.0f;
+                    float triW = 13.0f;
+                    D2D1_POINT_2F p1 = D2D1::Point2F(cx, cy - triH * 0.5f);
+                    D2D1_POINT_2F p2 = D2D1::Point2F(cx - triW * 0.5f, cy + triH * 0.5f);
+                    D2D1_POINT_2F p3 = D2D1::Point2F(cx + triW * 0.5f, cy + triH * 0.5f);
+                    if (pDrawBrush) {
+                        pRT->DrawLine(p1, p2, pDrawBrush, 1.4f, g_pRoundStrokeStyle);
+                        pRT->DrawLine(p2, p3, pDrawBrush, 1.4f, g_pRoundStrokeStyle);
+                        pRT->DrawLine(p3, p1, pDrawBrush, 1.4f, g_pRoundStrokeStyle);
+                    }
+                }
+                else if (btn.id == 6) {
+                    float cx = (btn.rect.left + btn.rect.right) * 0.5f;
+                    float cy = (btn.rect.top + btn.rect.bottom) * 0.5f - 1.0f;
+                    float half = 6.0f;
+                    float off = 2.4f;
+                    if (pDrawBrush) {
+                        pRT->DrawLine(D2D1::Point2F(cx - half, cy - off), D2D1::Point2F(cx + half, cy - off), pDrawBrush, 1.25f, g_pRoundStrokeStyle);
+                        pRT->DrawLine(D2D1::Point2F(cx - half, cy + off), D2D1::Point2F(cx + half, cy + off), pDrawBrush, 1.25f, g_pRoundStrokeStyle);
+                        pRT->DrawLine(D2D1::Point2F(cx - off, cy - half), D2D1::Point2F(cx - off, cy + half), pDrawBrush, 1.25f, g_pRoundStrokeStyle);
+                        pRT->DrawLine(D2D1::Point2F(cx + off, cy - half), D2D1::Point2F(cx + off, cy + half), pDrawBrush, 1.25f, g_pRoundStrokeStyle);
+                    }
+                }
+                else {
+                    const wchar_t* iconText = (btn.id == 5) ? (g_inkVisible ? L"\uE890" : L"\uED1A") : btn.label.c_str();
+                    pRT->DrawText(
+                        iconText,
+                        (UINT32)wcslen(iconText),
+                        g_pIconFormat,
+                        btn.rect,
+                        pDrawBrush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE
+                    );
+                }
                 if (pLblBrush) pLblBrush->Release();
             }
 
-            // Draw tiny downward caret for Shapes Flyout button
-            if (btn.id == 25) {
+            // Draw tiny downward caret for Shapes and Grid Flyout buttons
+            if (btn.id == 25 || btn.id == 6) {
                 float cx = btn.rect.right - 5.0f;
                 float cy = btn.rect.bottom - 5.0f;
                 ID2D1SolidColorBrush* pCaretBrush = nullptr;
@@ -1822,22 +1880,28 @@ void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT) {
 
     g_shapesFlyoutRect = D2D1::RectF(flyoutX, flyoutY, flyoutX + flyoutW, flyoutY + flyoutH);
 
-    // 2. Acrylic Glassmorphism chassis & soft glow border
+    // 2. Acrylic Glassmorphism chassis & styling consistent with main toolbar
     ID2D1SolidColorBrush* pBgBrush = nullptr;
     ID2D1SolidColorBrush* pBorderBrush = nullptr;
+    ID2D1SolidColorBrush* pRimBrush = nullptr;
     ID2D1SolidColorBrush* pShadowBrush = nullptr;
     ID2D1SolidColorBrush* pTextBrush = nullptr;
     ID2D1SolidColorBrush* pKeyBrush = nullptr;
     ID2D1SolidColorBrush* pActiveBrush = nullptr;
+    ID2D1SolidColorBrush* pActiveHoverBrush = nullptr;
     ID2D1SolidColorBrush* pHoverBrush = nullptr;
+    ID2D1SolidColorBrush* pActiveAccentBrush = nullptr;
 
-    pRT->CreateSolidColorBrush(D2D1::ColorF(0.09f, 0.11f, 0.16f, 0.96f), &pBgBrush);
-    pRT->CreateSolidColorBrush(D2D1::ColorF(0.32f, 0.85f, 0.69f, 0.45f), &pBorderBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.10f, 0.14f, 0.96f), &pBgBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.26f, 0.34f, 1.00f), &pBorderBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.48f, 0.60f, 0.50f), &pRimBrush);
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f), &pShadowBrush);
-    pRT->CreateSolidColorBrush(D2D1::ColorF(0.92f, 0.95f, 0.98f, 1.0f), &pTextBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.88f, 0.92f, 1.00f), &pTextBrush);
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.62f, 0.72f, 0.85f), &pKeyBrush);
-    pRT->CreateSolidColorBrush(D2D1::ColorF(0.32f, 0.85f, 0.69f, 0.22f), &pActiveBrush);
-    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f), &pHoverBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.20f, 0.32f, 0.44f, 0.95f), &pActiveBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.24f, 0.36f, 0.48f, 0.98f), &pActiveHoverBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.22f, 0.30f, 0.85f), &pHoverBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.90f, 0.75f, 1.00f), &pActiveAccentBrush);
 
     // Drop shadow
     if (pShadowBrush) {
@@ -1852,6 +1916,15 @@ void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT) {
     D2D1_ROUNDED_RECT modalR = D2D1::RoundedRect(g_shapesFlyoutRect, 8.0f, 8.0f);
     if (pBgBrush) pRT->FillRoundedRectangle(modalR, pBgBrush);
     if (pBorderBrush) pRT->DrawRoundedRectangle(modalR, pBorderBrush, 1.2f);
+
+    // Specular top rim highlight (matching main toolbar)
+    if (pRimBrush) {
+        pRT->DrawLine(
+            D2D1::Point2F(flyoutX + 8.0f, flyoutY + 1.5f),
+            D2D1::Point2F(flyoutX + flyoutW - 8.0f, flyoutY + 1.5f),
+            pRimBrush, 1.0f
+        );
+    }
 
     // Downward caret pointing to toolbar button
     if (showAbove && pBgBrush && pBorderBrush) {
@@ -1903,46 +1976,309 @@ void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT) {
         bool isSelected = (g_currentShape == options[i].type);
         bool isHovered = (g_hoveredShapeFlyoutItem == i);
 
-        if (isSelected && pActiveBrush) {
-            pRT->FillRoundedRectangle(roundItem, pActiveBrush);
-            if (pBorderBrush) {
-                pRT->DrawRoundedRectangle(roundItem, pBorderBrush, 1.0f);
-            }
+        // Active button background matching main toolbar active pill (0.20f, 0.32f, 0.44f, 0.95f)
+        if (isSelected) {
+            ID2D1SolidColorBrush* pPillBg = (isHovered && pActiveHoverBrush) ? pActiveHoverBrush : pActiveBrush;
+            if (pPillBg) pRT->FillRoundedRectangle(roundItem, pPillBg);
         }
         else if (isHovered && pHoverBrush) {
             pRT->FillRoundedRectangle(roundItem, pHoverBrush);
         }
 
+        ID2D1SolidColorBrush* pItemIconBrush = isSelected ? pActiveAccentBrush : pTextBrush;
+        ID2D1SolidColorBrush* pItemTextBrush = isSelected ? pActiveAccentBrush : pTextBrush;
+        ID2D1SolidColorBrush* pItemKeyBrush  = isSelected ? pActiveAccentBrush : pKeyBrush;
+
         // Active Checkmark (\uE73E CheckMark)
-        if (isSelected && g_pIconFormat && pTextBrush) {
+        if (isSelected && g_pIconFormat && pActiveAccentBrush) {
             D2D1_RECT_F checkR = D2D1::RectF(itemR.left + 4.0f, itemTop, itemR.left + 20.0f, itemTop + itemH);
-            pRT->DrawText(L"\uE73E", 1, g_pIconFormat, checkR, pBorderBrush ? pBorderBrush : pTextBrush);
+            pRT->DrawText(L"\uE73E", 1, g_pIconFormat, checkR, pActiveAccentBrush);
         }
 
         // Icon
-        if (g_pIconFormat) {
+        if (options[i].type == ShapeType::Triangle) {
             D2D1_RECT_F iconR = D2D1::RectF(itemR.left + 22.0f, itemTop, itemR.left + 42.0f, itemTop + itemH);
-            pRT->DrawText(options[i].icon, (UINT32)wcslen(options[i].icon), g_pIconFormat, iconR, isSelected && pBorderBrush ? pBorderBrush : pTextBrush);
+            float cx = (iconR.left + iconR.right) * 0.5f;
+            float cy = (iconR.top + iconR.bottom) * 0.5f;
+            float triH = 13.0f;
+            float triW = 14.0f;
+            D2D1_POINT_2F p1 = D2D1::Point2F(cx, cy - triH * 0.5f);
+            D2D1_POINT_2F p2 = D2D1::Point2F(cx - triW * 0.5f, cy + triH * 0.5f);
+            D2D1_POINT_2F p3 = D2D1::Point2F(cx + triW * 0.5f, cy + triH * 0.5f);
+            if (pItemIconBrush) {
+                pRT->DrawLine(p1, p2, pItemIconBrush, 1.4f, g_pRoundStrokeStyle);
+                pRT->DrawLine(p2, p3, pItemIconBrush, 1.4f, g_pRoundStrokeStyle);
+                pRT->DrawLine(p3, p1, pItemIconBrush, 1.4f, g_pRoundStrokeStyle);
+            }
+        }
+        else if (g_pIconFormat && pItemIconBrush) {
+            D2D1_RECT_F iconR = D2D1::RectF(itemR.left + 22.0f, itemTop, itemR.left + 42.0f, itemTop + itemH);
+            pRT->DrawText(options[i].icon, (UINT32)wcslen(options[i].icon), g_pIconFormat, iconR, pItemIconBrush);
         }
 
         // Name
-        if (g_pMenuTextFormat && pTextBrush) {
+        if (g_pMenuTextFormat && pItemTextBrush) {
             D2D1_RECT_F textR = D2D1::RectF(itemR.left + 46.0f, itemTop, itemR.right - 28.0f, itemTop + itemH);
-            pRT->DrawText(options[i].name, (UINT32)wcslen(options[i].name), g_pMenuTextFormat, textR, pTextBrush);
+            pRT->DrawText(options[i].name, (UINT32)wcslen(options[i].name), g_pMenuTextFormat, textR, pItemTextBrush);
         }
 
         // Shortcut Key Badge
-        if (g_pMenuKeyFormat && pKeyBrush) {
+        if (g_pMenuKeyFormat && pItemKeyBrush) {
             D2D1_RECT_F keyR = D2D1::RectF(itemR.right - 26.0f, itemTop, itemR.right - 6.0f, itemTop + itemH);
-            pRT->DrawText(options[i].key, (UINT32)wcslen(options[i].key), g_pMenuKeyFormat, keyR, pKeyBrush);
+            pRT->DrawText(options[i].key, (UINT32)wcslen(options[i].key), g_pMenuKeyFormat, keyR, pItemKeyBrush);
         }
     }
 
+    if (pActiveAccentBrush) pActiveAccentBrush->Release();
     if (pHoverBrush) pHoverBrush->Release();
+    if (pActiveHoverBrush) pActiveHoverBrush->Release();
     if (pActiveBrush) pActiveBrush->Release();
     if (pKeyBrush) pKeyBrush->Release();
     if (pTextBrush) pTextBrush->Release();
     if (pShadowBrush) pShadowBrush->Release();
+    if (pRimBrush) pRimBrush->Release();
+    if (pBorderBrush) pBorderBrush->Release();
+    if (pBgBrush) pBgBrush->Release();
+}
+
+void RebuildGridBrush() {
+    if (g_pGridBrush) {
+        g_pGridBrush->Release();
+        g_pGridBrush = nullptr;
+    }
+    if (g_gridStyle == GridStyle::None || !g_pRenderTarget) return;
+
+    int S = (int)g_gridDensity;
+    if (S < 8) S = 48;
+
+    ID2D1BitmapRenderTarget* pBitmapRT = nullptr;
+    HRESULT hr = g_pRenderTarget->CreateCompatibleRenderTarget(D2D1::SizeF((float)S, (float)S), &pBitmapRT);
+    if (SUCCEEDED(hr) && pBitmapRT) {
+        pBitmapRT->BeginDraw();
+        pBitmapRT->Clear(D2D1::ColorF(0, 0, 0, 0));
+
+        if (g_gridStyle == GridStyle::DotGrid) {
+            ID2D1SolidColorBrush* pDotBrush = nullptr;
+            pBitmapRT->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.72f, 0.95f, 0.38f), &pDotBrush);
+            if (pDotBrush) {
+                float r = (S >= 48) ? 1.25f : 1.0f;
+                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(0.0f, 0.0f), r, r), pDotBrush);
+                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)S, 0.0f), r, r), pDotBrush);
+                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(0.0f, (float)S), r, r), pDotBrush);
+                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)S, (float)S), r, r), pDotBrush);
+                pDotBrush->Release();
+            }
+        }
+        else if (g_gridStyle == GridStyle::GraphLines) {
+            ID2D1SolidColorBrush* pLineBrush = nullptr;
+            pBitmapRT->CreateSolidColorBrush(D2D1::ColorF(0.50f, 0.68f, 0.90f, 0.22f), &pLineBrush);
+            if (pLineBrush) {
+                pBitmapRT->DrawLine(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F((float)S, 0.0f), pLineBrush, 1.0f);
+                pBitmapRT->DrawLine(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, (float)S), pLineBrush, 1.0f);
+                pLineBrush->Release();
+            }
+        }
+
+        pBitmapRT->EndDraw();
+
+        ID2D1Bitmap* pTileBitmap = nullptr;
+        if (SUCCEEDED(pBitmapRT->GetBitmap(&pTileBitmap)) && pTileBitmap) {
+            D2D1_BITMAP_BRUSH_PROPERTIES brushProps = D2D1::BitmapBrushProperties(
+                D2D1_EXTEND_MODE_WRAP,
+                D2D1_EXTEND_MODE_WRAP,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
+            );
+            g_pRenderTarget->CreateBitmapBrush(pTileBitmap, brushProps, &g_pGridBrush);
+            pTileBitmap->Release();
+        }
+        pBitmapRT->Release();
+    }
+}
+
+void DrawGridFlyout(ID2D1HwndRenderTarget* pRT) {
+    if (!g_gridFlyoutOpen || !g_settings.showBottomToolbar) return;
+
+    // 1. Locate the Grid button (id 6) on the toolbar
+    float btnAbsLeft = 0, btnAbsTop = 0, btnAbsRight = 0, btnAbsBottom = 0;
+    bool foundBtn = false;
+    for (const auto& btn : g_toolbarButtons) {
+        if (btn.id == 6) {
+            btnAbsLeft = btn.rect.left;
+            btnAbsTop = btn.rect.top;
+            btnAbsRight = btn.rect.right;
+            btnAbsBottom = btn.rect.bottom;
+            foundBtn = true;
+            break;
+        }
+    }
+    if (!foundBtn) return;
+
+    const float flyoutW = 188.0f;
+    const float itemH = 30.0f;
+    const float padY = 6.0f;
+    const float divH = 8.0f;
+    const float flyoutH = padY * 2.0f + itemH * 6 + divH;
+
+    float flyoutX = (btnAbsLeft + btnAbsRight) * 0.5f - flyoutW * 0.5f;
+    if (flyoutX < 12.0f) flyoutX = 12.0f;
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    if (flyoutX + flyoutW > (float)vw - 12.0f) {
+        flyoutX = (float)vw - flyoutW - 12.0f;
+    }
+
+    float flyoutY = g_toolbarRect.top - flyoutH - 8.0f;
+    bool showAbove = true;
+    if (flyoutY < 12.0f) {
+        flyoutY = g_toolbarRect.bottom + 8.0f;
+        showAbove = false;
+    }
+
+    g_gridFlyoutRect = D2D1::RectF(flyoutX, flyoutY, flyoutX + flyoutW, flyoutY + flyoutH);
+
+    // 2. Acrylic Glassmorphism chassis & styling consistent with main toolbar
+    ID2D1SolidColorBrush* pBgBrush = nullptr;
+    ID2D1SolidColorBrush* pBorderBrush = nullptr;
+    ID2D1SolidColorBrush* pRimBrush = nullptr;
+    ID2D1SolidColorBrush* pShadowBrush = nullptr;
+    ID2D1SolidColorBrush* pTextBrush = nullptr;
+    ID2D1SolidColorBrush* pKeyBrush = nullptr;
+    ID2D1SolidColorBrush* pActiveBrush = nullptr;
+    ID2D1SolidColorBrush* pActiveHoverBrush = nullptr;
+    ID2D1SolidColorBrush* pHoverBrush = nullptr;
+    ID2D1SolidColorBrush* pActiveAccentBrush = nullptr;
+    ID2D1SolidColorBrush* pDivBrush = nullptr;
+
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.10f, 0.14f, 0.96f), &pBgBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.26f, 0.34f, 1.00f), &pBorderBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.48f, 0.60f, 0.50f), &pRimBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f), &pShadowBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.88f, 0.92f, 1.00f), &pTextBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.62f, 0.72f, 0.85f), &pKeyBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.20f, 0.32f, 0.44f, 0.95f), &pActiveBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.24f, 0.36f, 0.48f, 0.98f), &pActiveHoverBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.22f, 0.30f, 0.85f), &pHoverBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.90f, 0.75f, 1.00f), &pActiveAccentBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.26f, 0.34f, 0.80f), &pDivBrush);
+
+    // Drop shadow
+    if (pShadowBrush) {
+        D2D1_ROUNDED_RECT shadowR = D2D1::RoundedRect(
+            D2D1::RectF(flyoutX + 2.0f, flyoutY + 2.0f, flyoutX + flyoutW + 2.0f, flyoutY + flyoutH + 2.0f),
+            8.0f, 8.0f
+        );
+        pRT->FillRoundedRectangle(shadowR, pShadowBrush);
+    }
+
+    // Modal Background
+    D2D1_ROUNDED_RECT modalR = D2D1::RoundedRect(g_gridFlyoutRect, 8.0f, 8.0f);
+    if (pBgBrush) pRT->FillRoundedRectangle(modalR, pBgBrush);
+    if (pBorderBrush) pRT->DrawRoundedRectangle(modalR, pBorderBrush, 1.2f);
+
+    // Specular top rim highlight (matching main toolbar)
+    if (pRimBrush) {
+        pRT->DrawLine(
+            D2D1::Point2F(flyoutX + 8.0f, flyoutY + 1.5f),
+            D2D1::Point2F(flyoutX + flyoutW - 8.0f, flyoutY + 1.5f),
+            pRimBrush, 1.0f
+        );
+    }
+
+    // Downward caret pointing to toolbar button
+    if (showAbove && pBgBrush && pBorderBrush) {
+        float tipX = (btnAbsLeft + btnAbsRight) * 0.5f;
+        float caretY = flyoutY + flyoutH;
+        D2D1_POINT_2F p1 = D2D1::Point2F(tipX - 6.0f, caretY - 0.5f);
+        D2D1_POINT_2F p2 = D2D1::Point2F(tipX, caretY + 5.5f);
+        D2D1_POINT_2F p3 = D2D1::Point2F(tipX + 6.0f, caretY - 0.5f);
+
+        ID2D1PathGeometry* pCaretGeo = nullptr;
+        if (SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pCaretGeo))) {
+            ID2D1GeometrySink* pSink = nullptr;
+            if (SUCCEEDED(pCaretGeo->Open(&pSink))) {
+                pSink->BeginFigure(p1, D2D1_FIGURE_BEGIN_FILLED);
+                pSink->AddLine(p2);
+                pSink->AddLine(p3);
+                pSink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                pSink->Close();
+                pSink->Release();
+
+                pRT->FillGeometry(pCaretGeo, pBgBrush);
+                pRT->DrawLine(p1, p2, pBorderBrush, 1.2f);
+                pRT->DrawLine(p2, p3, pBorderBrush, 1.2f);
+            }
+            pCaretGeo->Release();
+        }
+    }
+
+    struct GridOptionItem {
+        const wchar_t* name;
+        const wchar_t* key;
+        bool isSelected;
+    };
+    GridOptionItem items[6] = {
+        { L"Grid Off",      L"",  g_gridStyle == GridStyle::None },
+        { L"Dot Grid",      L"",  g_gridStyle == GridStyle::DotGrid },
+        { L"Graph Paper",   L"G", g_gridStyle == GridStyle::GraphLines },
+        { L"Fine  (24px)",   L"",  g_gridDensity == GridDensity::Fine },
+        { L"Medium  (48px)", L"",  g_gridDensity == GridDensity::Medium },
+        { L"Coarse  (96px)", L"",  g_gridDensity == GridDensity::Coarse }
+    };
+
+    for (int i = 0; i < 6; ++i) {
+        float itemTop = flyoutY + padY + i * itemH + (i >= 3 ? divH : 0.0f);
+        D2D1_RECT_F itemR = D2D1::RectF(flyoutX + 5.0f, itemTop, flyoutX + flyoutW - 5.0f, itemTop + itemH);
+        D2D1_ROUNDED_RECT roundItem = D2D1::RoundedRect(itemR, 4.0f, 4.0f);
+
+        bool isSelected = items[i].isSelected;
+        bool isHovered = (g_hoveredGridFlyoutItem == i);
+
+        // Active button background matching main toolbar active pill (0.20f, 0.32f, 0.44f, 0.95f)
+        if (isSelected) {
+            ID2D1SolidColorBrush* pPillBg = (isHovered && pActiveHoverBrush) ? pActiveHoverBrush : pActiveBrush;
+            if (pPillBg) pRT->FillRoundedRectangle(roundItem, pPillBg);
+        }
+        else if (isHovered && pHoverBrush) {
+            pRT->FillRoundedRectangle(roundItem, pHoverBrush);
+        }
+
+        ID2D1SolidColorBrush* pItemTextBrush = isSelected ? pActiveAccentBrush : pTextBrush;
+        ID2D1SolidColorBrush* pItemKeyBrush  = isSelected ? pActiveAccentBrush : pKeyBrush;
+
+        // Active Checkmark (\uE73E CheckMark)
+        if (isSelected && g_pIconFormat && pActiveAccentBrush) {
+            D2D1_RECT_F checkR = D2D1::RectF(itemR.left + 4.0f, itemTop, itemR.left + 22.0f, itemTop + itemH);
+            pRT->DrawText(L"\uE73E", 1, g_pIconFormat, checkR, pActiveAccentBrush);
+        }
+
+        // Name
+        if (g_pMenuTextFormat && pItemTextBrush) {
+            float textRight = (wcslen(items[i].key) > 0) ? (itemR.right - 28.0f) : (itemR.right - 8.0f);
+            D2D1_RECT_F textR = D2D1::RectF(itemR.left + 26.0f, itemTop, textRight, itemTop + itemH);
+            pRT->DrawText(items[i].name, (UINT32)wcslen(items[i].name), g_pMenuTextFormat, textR, pItemTextBrush);
+        }
+
+        // Shortcut Key Badge
+        if (g_pMenuKeyFormat && pItemKeyBrush && wcslen(items[i].key) > 0) {
+            D2D1_RECT_F keyR = D2D1::RectF(itemR.right - 26.0f, itemTop, itemR.right - 6.0f, itemTop + itemH);
+            pRT->DrawText(items[i].key, (UINT32)wcslen(items[i].key), g_pMenuKeyFormat, keyR, pItemKeyBrush);
+        }
+
+        // Divider between Style (0..2) and Density (3..5)
+        if (i == 2 && pDivBrush) {
+            float divY = itemTop + itemH + divH * 0.5f;
+            pRT->DrawLine(D2D1::Point2F(flyoutX + 10.0f, divY), D2D1::Point2F(flyoutX + flyoutW - 10.0f, divY), pDivBrush, 1.0f);
+        }
+    }
+
+    if (pDivBrush) pDivBrush->Release();
+    if (pActiveAccentBrush) pActiveAccentBrush->Release();
+    if (pHoverBrush) pHoverBrush->Release();
+    if (pActiveHoverBrush) pActiveHoverBrush->Release();
+    if (pActiveBrush) pActiveBrush->Release();
+    if (pKeyBrush) pKeyBrush->Release();
+    if (pTextBrush) pTextBrush->Release();
+    if (pShadowBrush) pShadowBrush->Release();
+    if (pRimBrush) pRimBrush->Release();
     if (pBorderBrush) pBorderBrush->Release();
     if (pBgBrush) pBgBrush->Release();
 }
@@ -1960,6 +2296,16 @@ void RenderOverlay() {
             g_pDesktopBitmap,
             D2D1::RectF(0, 0, size.width, size.height)
         );
+    }
+
+    // 1b. Low-Resource Hardware-Accelerated Grid Overlay (Single GPU draw call)
+    // Visible in normal and click-through pointer modes, but hidden when canvas visibility is toggled off (g_inkVisible == false)
+    if (g_gridStyle != GridStyle::None && g_pGridBrush && g_inkVisible) {
+        D2D1_MATRIX_3X2_F gridMatrix = D2D1::Matrix3x2F::Scale(g_zoomScale, g_zoomScale) *
+                                       D2D1::Matrix3x2F::Translation(g_panOffsetX, g_panOffsetY);
+        g_pGridBrush->SetTransform(gridMatrix);
+        D2D1_SIZE_F size = g_pRenderTarget->GetSize();
+        g_pRenderTarget->FillRectangle(D2D1::RectF(0, 0, size.width, size.height), g_pGridBrush);
     }
 
     // Apply Pan & Zoom Transform to Strokes
@@ -1998,6 +2344,11 @@ void RenderOverlay() {
         // 5b. Shapes Action Modal (drawn on top of toolbar when open)
         if (g_shapesFlyoutOpen) {
             DrawShapesFlyout(g_pRenderTarget);
+        }
+
+        // 5c. Grid Settings Action Modal (drawn on top of toolbar when open)
+        if (g_gridFlyoutOpen) {
+            DrawGridFlyout(g_pRenderTarget);
         }
 
         // 6. Circular Radial Quick Menu
@@ -2047,13 +2398,15 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
         bool hit = false;
         if (it->shapeType == ShapeType::Freehand) {
             const auto& pts = it->points;
+            float effR = adjustedRadius + it->width * 0.5f;
+            float effRSq = effR * effR;
             for (size_t i = 0; i < pts.size(); ++i) {
-                if (DistanceSq(adjustedX, adjustedY, pts[i].x, pts[i].y) <= rSq) {
+                if (DistanceSq(adjustedX, adjustedY, pts[i].x, pts[i].y) <= effRSq) {
                     hit = true;
                     break;
                 }
                 if (i + 1 < pts.size()) {
-                    if (DistToSegmentSq(adjustedX, adjustedY, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y) <= rSq) {
+                    if (DistToSegmentSq(adjustedX, adjustedY, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y) <= effRSq) {
                         hit = true;
                         break;
                     }
@@ -2579,8 +2932,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_KEYDOWN: {
         if (wParam == VK_ESCAPE) {
-            if (g_shapesFlyoutOpen) {
+            if (g_shapesFlyoutOpen || g_gridFlyoutOpen) {
                 g_shapesFlyoutOpen = false;
+                g_gridFlyoutOpen = false;
                 InvalidateOverlay();
                 return 0;
             }
@@ -2623,6 +2977,39 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             StartSnipping();
             return 0;
         }
+        if (wParam == 'G') {
+            if (GetKeyState(VK_SHIFT) & 0x8000) {
+                // Shift+G: Cycle density (Fine -> Medium -> Coarse -> Fine)
+                if (g_gridDensity == GridDensity::Fine) {
+                    g_gridDensity = GridDensity::Medium;
+                }
+                else if (g_gridDensity == GridDensity::Medium) {
+                    g_gridDensity = GridDensity::Coarse;
+                }
+                else {
+                    g_gridDensity = GridDensity::Fine;
+                }
+                if (g_gridStyle == GridStyle::None) {
+                    g_gridStyle = GridStyle::DotGrid;
+                }
+                RebuildGridBrush();
+                InvalidateOverlay();
+                return 0;
+            }
+            // G: Cycle style (None -> DotGrid -> GraphLines -> None)
+            if (g_gridStyle == GridStyle::None) {
+                g_gridStyle = GridStyle::DotGrid;
+            }
+            else if (g_gridStyle == GridStyle::DotGrid) {
+                g_gridStyle = GridStyle::GraphLines;
+            }
+            else {
+                g_gridStyle = GridStyle::None;
+            }
+            RebuildGridBrush();
+            InvalidateOverlay();
+            return 0;
+        }
         if (wParam == 'E') { SetToolMode(ToolMode::Eraser); return 0; }
         if (wParam == 'P') { SetToolMode((g_currentTool == ToolMode::Pan) ? ToolMode::Pen : ToolMode::Pan); return 0; }
         if (wParam == 'M') { SetToolMode((g_currentTool == ToolMode::Pointer) ? ToolMode::Pen : ToolMode::Pointer); return 0; }
@@ -2636,12 +3023,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
-        if (wParam == 'F') { g_currentShape = ShapeType::Freehand; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
-        if (wParam == 'L') { g_currentShape = ShapeType::Line; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
-        if (wParam == 'A') { g_currentShape = ShapeType::Arrow; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
-        if (wParam == 'R') { g_currentShape = ShapeType::Rectangle; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
-        if (wParam == 'O') { g_currentShape = ShapeType::Ellipse; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
-        if (wParam == 'T') { g_currentShape = ShapeType::Triangle; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
+        if (wParam == 'F') { g_currentShape = ShapeType::Freehand; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
+        if (wParam == 'L') { g_currentShape = ShapeType::Line; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
+        if (wParam == 'A') { g_currentShape = ShapeType::Arrow; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
+        if (wParam == 'R') { g_currentShape = ShapeType::Rectangle; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
+        if (wParam == 'O') { g_currentShape = ShapeType::Ellipse; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
+        if (wParam == 'T') { g_currentShape = ShapeType::Triangle; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
         if (wParam >= '1' && wParam <= '5') {
             int penIdx = (int)(wParam - '1');
             g_activeColor = kPresetColors[penIdx];
@@ -2753,6 +3140,25 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             if (oldFlyoutHover != g_hoveredShapeFlyoutItem) {
+                InvalidateOverlay();
+            }
+        }
+
+        // Check Grid Flyout Item Hover
+        if (g_gridFlyoutOpen) {
+            int oldGridHover = g_hoveredGridFlyoutItem;
+            g_hoveredGridFlyoutItem = -1;
+            if (g_cursorX >= g_gridFlyoutRect.left && g_cursorX <= g_gridFlyoutRect.right &&
+                g_cursorY >= (g_gridFlyoutRect.top + 6.0f) && g_cursorY <= (g_gridFlyoutRect.bottom - 6.0f)) {
+                float relY = g_cursorY - (g_gridFlyoutRect.top + 6.0f);
+                if (relY >= 0.0f && relY < 90.0f) {
+                    g_hoveredGridFlyoutItem = (int)(relY / 30.0f);
+                }
+                else if (relY >= 98.0f && relY < 188.0f) {
+                    g_hoveredGridFlyoutItem = 3 + (int)((relY - 98.0f) / 30.0f);
+                }
+            }
+            if (oldGridHover != g_hoveredGridFlyoutItem) {
                 InvalidateOverlay();
             }
         }
@@ -2970,6 +3376,83 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
         }
 
+        // Grid Flyout Selection
+        if (g_gridFlyoutOpen) {
+            if (x >= g_gridFlyoutRect.left && x <= g_gridFlyoutRect.right &&
+                y >= g_gridFlyoutRect.top && y <= g_gridFlyoutRect.bottom) {
+                float relY = y - (g_gridFlyoutRect.top + 6.0f);
+                int clickedIdx = -1;
+                if (relY >= 0.0f && relY < 90.0f) {
+                    clickedIdx = (int)(relY / 30.0f);
+                }
+                else if (relY >= 98.0f && relY < 188.0f) {
+                    clickedIdx = 3 + (int)((relY - 98.0f) / 30.0f);
+                }
+
+                if (clickedIdx == 0) {
+                    g_gridStyle = GridStyle::None;
+                    RebuildGridBrush();
+                    InvalidateOverlay();
+                }
+                else if (clickedIdx == 1) {
+                    g_gridStyle = GridStyle::DotGrid;
+                    RebuildGridBrush();
+                    InvalidateOverlay();
+                }
+                else if (clickedIdx == 2) {
+                    g_gridStyle = GridStyle::GraphLines;
+                    RebuildGridBrush();
+                    InvalidateOverlay();
+                }
+                else if (clickedIdx == 3) {
+                    g_gridDensity = GridDensity::Fine;
+                    if (g_gridStyle == GridStyle::None) g_gridStyle = GridStyle::DotGrid;
+                    RebuildGridBrush();
+                    InvalidateOverlay();
+                }
+                else if (clickedIdx == 4) {
+                    g_gridDensity = GridDensity::Medium;
+                    if (g_gridStyle == GridStyle::None) g_gridStyle = GridStyle::DotGrid;
+                    RebuildGridBrush();
+                    InvalidateOverlay();
+                }
+                else if (clickedIdx == 5) {
+                    g_gridDensity = GridDensity::Coarse;
+                    if (g_gridStyle == GridStyle::None) g_gridStyle = GridStyle::DotGrid;
+                    RebuildGridBrush();
+                    InvalidateOverlay();
+                }
+                return 0;
+            }
+            else {
+                g_gridFlyoutOpen = false;
+                InvalidateOverlay();
+
+                // If user clicked directly on Grid button (id 6), dismiss without re-opening
+                bool clickedGridBtn = false;
+                if (g_settings.showBottomToolbar &&
+                    x >= g_toolbarRect.left && x <= g_toolbarRect.right &&
+                    y >= g_toolbarRect.top && y <= g_toolbarRect.bottom) {
+                    for (const auto& b : g_toolbarButtons) {
+                        if (b.id == 6 && x >= b.rect.left && x <= b.rect.right && y >= b.rect.top && y <= b.rect.bottom) {
+                            clickedGridBtn = true;
+                            break;
+                        }
+                    }
+                }
+                if (clickedGridBtn) {
+                    return 0;
+                }
+
+                // If clicked on canvas outside toolbar, swallow to prevent accidental inking
+                if (!(g_settings.showBottomToolbar &&
+                      x >= g_toolbarRect.left && x <= g_toolbarRect.right &&
+                      y >= g_toolbarRect.top && y <= g_toolbarRect.bottom)) {
+                    return 0;
+                }
+            }
+        }
+
         // Toolbar Drag Handle Check
         if (g_hoveredToolbarBtn == 0 || (x >= g_toolbarRect.left && x <= g_toolbarRect.right && y >= g_toolbarRect.top && y <= g_toolbarRect.bottom && g_hoveredToolbarBtn == -1)) {
             g_isDraggingToolbar = true;
@@ -3003,6 +3486,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (btn.isPen) {
                 g_activeColor = btn.penColor;
                 g_shapesFlyoutOpen = false;
+                g_gridFlyoutOpen = false;
                 SetToolMode(ToolMode::Pen);
                 SetForegroundWindow(hwnd);
             }
@@ -3010,36 +3494,48 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 switch (btn.id) {
                 case 1: // Highlighter
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Highlighter) ? ToolMode::Pen : ToolMode::Highlighter);
                     SetForegroundWindow(hwnd);
                     break;
                 case 2: // Eraser
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Eraser) ? ToolMode::Pen : ToolMode::Eraser);
                     SetForegroundWindow(hwnd);
                     break;
                 case 3: // Pan
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Pan) ? ToolMode::Pen : ToolMode::Pan);
                     SetForegroundWindow(hwnd);
                     break;
                 case 4: // Pointer (Click-Through)
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Pointer) ? ToolMode::Pen : ToolMode::Pointer);
                     break;
                 case 5: // Eye Visibility
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     g_inkVisible = !g_inkVisible;
+                    break;
+                case 6: // Grid Settings Flyout Modal
+                    g_gridFlyoutOpen = !g_gridFlyoutOpen;
+                    g_shapesFlyoutOpen = false;
+                    SetForegroundWindow(hwnd);
                     break;
                 case 20: // Freehand
                     g_currentShape = ShapeType::Freehand;
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     SetToolMode(ToolMode::Pen);
                     BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
                     SetForegroundWindow(hwnd);
                     break;
                 case 25: // Shapes Action Modal Toggle
                     g_shapesFlyoutOpen = !g_shapesFlyoutOpen;
+                    g_gridFlyoutOpen = false;
                     if (g_shapesFlyoutOpen) {
                         SetToolMode(ToolMode::Pen);
                     }
@@ -3047,18 +3543,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     break;
                 case 10: // Snapshot
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     StartSnipping();
                     break;
                 case 11: // Undo
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     PerformUndo();
                     break;
                 case 12: // Redo
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     PerformRedo();
                     break;
                 case 13: // Clear
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     if (!g_strokes.empty()) {
                         PushUndoState();
                         g_strokes.clear();
@@ -3066,6 +3566,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     break;
                 case 99: // Exit
                     g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
                     HideOverlay();
                     return 0;
                 }
@@ -3159,7 +3660,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ReleaseCapture();
             g_isDrawing = false;
             if (g_currentStroke.shapeType == ShapeType::Freehand) {
-                if (g_currentStroke.points.size() > 1) {
+                if (!g_currentStroke.points.empty()) {
                     PushUndoState();
                     g_currentStroke.ComputeBounds();
                     BuildStrokeGeometry(g_currentStroke);
@@ -3235,6 +3736,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 pt.y >= g_shapesFlyoutRect.top && pt.y <= g_shapesFlyoutRect.bottom) {
                 return HTCLIENT;
             }
+            if (g_gridFlyoutOpen &&
+                pt.x >= g_gridFlyoutRect.left && pt.x <= g_gridFlyoutRect.right &&
+                pt.y >= g_gridFlyoutRect.top && pt.y <= g_gridFlyoutRect.bottom) {
+                return HTCLIENT;
+            }
             if (g_settings.showBottomToolbar &&
                 pt.x >= (g_toolbarRect.left - 6.0f) && pt.x <= (g_toolbarRect.right + 6.0f) &&
                 pt.y >= (g_toolbarRect.top - 6.0f) && pt.y <= (g_toolbarRect.bottom + 6.0f)) {
@@ -3269,6 +3775,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_shapesFlyoutOpen &&
                 pt.x >= g_shapesFlyoutRect.left && pt.x <= g_shapesFlyoutRect.right &&
                 pt.y >= g_shapesFlyoutRect.top && pt.y <= g_shapesFlyoutRect.bottom) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            if (g_gridFlyoutOpen &&
+                pt.x >= g_gridFlyoutRect.left && pt.x <= g_gridFlyoutRect.right &&
+                pt.y >= g_gridFlyoutRect.top && pt.y <= g_gridFlyoutRect.bottom) {
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 return TRUE;
             }
@@ -3349,6 +3861,8 @@ void ShowOverlay() {
     g_hoveredToolbarBtn = -1;
     g_shapesFlyoutOpen = false;
     g_hoveredShapeFlyoutItem = -1;
+    g_gridFlyoutOpen = false;
+    g_hoveredGridFlyoutItem = -1;
     g_lastOverlayOpenTime = GetTickCount64();
 
     ShowWindow(g_hOverlayWnd, SW_SHOW);
@@ -3366,6 +3880,8 @@ void HideOverlay() {
     g_bIsActive = false;
     g_shapesFlyoutOpen = false;
     g_hoveredShapeFlyoutItem = -1;
+    g_gridFlyoutOpen = false;
+    g_hoveredGridFlyoutItem = -1;
     g_radialActive = false;
     g_isDrawing = false;
     g_isPanning = false;

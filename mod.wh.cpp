@@ -38,8 +38,10 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
    - **Hold & Move Right Mouse Button**: Instant stroke-level eraser with circular radius indicator.
    - **Quick Right-Click Tap**: Opens a floating **Circular Radial Menu** with a 360-degree color wheel and quick tools.
 
-5. **Pan & Canvas Navigation**:
+5. **Pan & Zoom Canvas Navigation**:
    - **Pan Mode** (`P` key): Drags and offsets all annotations across the screen.
+   - **Canvas Zoom**: While holding the canvas or in Pan mode, scroll the mouse wheel to dynamically zoom in and out centered on the cursor (15% - 800%).
+   - **Reset View**: Press `0` or `Ctrl + 0` to instantly reset zoom (100%) and pan offset (0, 0).
 
 6. **Pointer / Click-Through Mode**:
    - **Pointer Mode** (`M` key): Allows clicking through directly to desktop apps/games while keeping drawings visible.
@@ -248,9 +250,10 @@ static D2D1_COLOR_F g_activeColor = kPresetColors[0];
 static float g_currentPenWidth = 3.5f;
 static bool g_inkVisible = true;
 
-// Pan state
+// Pan & Zoom state
 static float g_panOffsetX = 0.0f;
 static float g_panOffsetY = 0.0f;
+static float g_zoomScale = 1.0f;
 static bool g_isPanning = false;
 static POINT g_panStartPos = { 0, 0 };
 
@@ -309,8 +312,9 @@ static float g_toolbarCustomY = -1.0f;
 static ULONGLONG g_toastStartTime = 0;
 static std::wstring g_toastMessage = L"";
 
-// Brush size preview timer
+// Brush & Zoom size preview timer
 static ULONGLONG g_sizePreviewTime = 0;
+static ULONGLONG g_zoomPreviewTime = 0;
 
 // ----------------------------------------------------------------------------
 // Forward Declarations
@@ -322,6 +326,7 @@ void CaptureDesktop();
 void ReleaseD2DResources();
 void InvalidateOverlay();
 void RenderOverlay();
+void DrawZoomPreview(ID2D1HwndRenderTarget* pRT);
 void CopySnapshotToClipboard();
 void EraseBrushAt(float x, float y, float radius);
 bool EraseWholeShapeAt(float x, float y, float radius);
@@ -1092,6 +1097,53 @@ void DrawPenSizePreview(ID2D1HwndRenderTarget* pRT) {
     }
 }
 
+void DrawZoomPreview(ID2D1HwndRenderTarget* pRT) {
+    if (g_zoomPreviewTime == 0) return;
+    ULONGLONG elapsed = GetTickCount64() - g_zoomPreviewTime;
+    if (elapsed > 1100) {
+        g_zoomPreviewTime = 0;
+        return;
+    }
+
+    float alpha = 1.0f;
+    if (elapsed > 800) {
+        alpha = 1.0f - (float)(elapsed - 800) / 300.0f;
+    }
+
+    int zoomPct = (int)std::round(g_zoomScale * 100.0f);
+    std::wstring text = L"Zoom: " + std::to_wstring(zoomPct) + L"%";
+
+    const float badgeW = 110.0f;
+    const float badgeH = 26.0f;
+    float badgeX = (g_toolbarRect.left + g_toolbarRect.right - badgeW) * 0.5f;
+    float badgeY = g_toolbarRect.top - badgeH - 8.0f;
+    if (!g_settings.showBottomToolbar || badgeY < 10.0f) {
+        D2D1_SIZE_F rtSize = pRT->GetSize();
+        badgeX = (rtSize.width - badgeW) * 0.5f;
+        badgeY = rtSize.height - 60.0f;
+    }
+
+    D2D1_RECT_F rect = D2D1::RectF(badgeX, badgeY, badgeX + badgeW, badgeY + badgeH);
+
+    ID2D1SolidColorBrush* pBgBrush = nullptr;
+    ID2D1SolidColorBrush* pBorderBrush = nullptr;
+    ID2D1SolidColorBrush* pTextBrush = nullptr;
+
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.12f, 0.16f, 0.88f * alpha), &pBgBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.35f, 0.40f, 0.50f, 0.80f * alpha), &pBorderBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.96f, 0.98f, 0.95f * alpha), &pTextBrush);
+
+    if (pBgBrush && pBorderBrush && pTextBrush && g_pTextFormat) {
+        pRT->FillRoundedRectangle(D2D1::RoundedRect(rect, 5.0f, 5.0f), pBgBrush);
+        pRT->DrawRoundedRectangle(D2D1::RoundedRect(rect, 5.0f, 5.0f), pBorderBrush, 1.0f);
+        pRT->DrawText(text.c_str(), (UINT32)text.length(), g_pTextFormat, rect, pTextBrush);
+    }
+
+    if (pTextBrush) pTextBrush->Release();
+    if (pBorderBrush) pBorderBrush->Release();
+    if (pBgBrush) pBgBrush->Release();
+}
+
 void DrawToast(ID2D1HwndRenderTarget* pRT, int screenW, int screenH) {
     if (g_toastStartTime == 0) return;
     ULONGLONG elapsed = GetTickCount64() - g_toastStartTime;
@@ -1178,9 +1230,10 @@ void RenderOverlay() {
         );
     }
 
-    // Apply Pan Translation to Strokes
-    D2D1_MATRIX_3X2_F panMatrix = D2D1::Matrix3x2F::Translation(g_panOffsetX, g_panOffsetY);
-    g_pRenderTarget->SetTransform(panMatrix);
+    // Apply Pan & Zoom Transform to Strokes
+    D2D1_MATRIX_3X2_F canvasMatrix = D2D1::Matrix3x2F::Scale(g_zoomScale, g_zoomScale) *
+                                     D2D1::Matrix3x2F::Translation(g_panOffsetX, g_panOffsetY);
+    g_pRenderTarget->SetTransform(canvasMatrix);
 
     // 2. Draw completed strokes
     for (const auto& stroke : g_strokes) {
@@ -1195,9 +1248,10 @@ void RenderOverlay() {
     // Reset transform for HUD & Toolbar
     g_pRenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
 
-    // 4. Eraser cursor & Pen size bubble
+    // 4. Eraser cursor, Pen size bubble & Zoom badge
     DrawEraserCursor(g_pRenderTarget);
     DrawPenSizePreview(g_pRenderTarget);
+    DrawZoomPreview(g_pRenderTarget);
 
     // 5. Compact Bottom Toolbar
     DrawToolbar(g_pRenderTarget);
@@ -1217,10 +1271,11 @@ void RenderOverlay() {
 // ----------------------------------------------------------------------------
 
 void EraseBrushAt(float x, float y, float radius) {
-    float rSq = radius * radius;
+    float adjustedRadius = radius / g_zoomScale;
+    float rSq = adjustedRadius * adjustedRadius;
     bool changed = false;
-    float adjustedX = x - g_panOffsetX;
-    float adjustedY = y - g_panOffsetY;
+    float adjustedX = (x - g_panOffsetX) / g_zoomScale;
+    float adjustedY = (y - g_panOffsetY) / g_zoomScale;
 
     std::vector<Stroke> resultingStrokes;
     resultingStrokes.reserve(g_strokes.size() + 8);
@@ -1255,7 +1310,7 @@ void EraseBrushAt(float x, float y, float radius) {
                     float dx = stroke.points[i + 1].x - stroke.points[i].x;
                     float dy = stroke.points[i + 1].y - stroke.points[i].y;
                     float d = std::sqrt(dx * dx + dy * dy);
-                    float step = std::max(2.0f, radius * 0.35f);
+                    float step = std::max(1.0f, adjustedRadius * 0.35f);
                     if (d > step) {
                         int steps = (int)(d / step);
                         for (int s = 1; s < steps; ++s) {
@@ -1296,7 +1351,7 @@ void EraseBrushAt(float x, float y, float radius) {
             float dx = stroke.endPt.x - stroke.startPt.x;
             float dy = stroke.endPt.y - stroke.startPt.y;
             float len = std::sqrt(dx * dx + dy * dy);
-            float step = std::max(2.0f, radius * 0.35f);
+            float step = std::max(1.0f, adjustedRadius * 0.35f);
             int steps = (int)(len / step);
             if (steps < 2) steps = 2;
 
@@ -1342,7 +1397,7 @@ void EraseBrushAt(float x, float y, float radius) {
 
             changed = true;
             std::vector<StrokePoint> rectPts;
-            float step = std::max(2.0f, radius * 0.35f);
+            float step = std::max(1.0f, adjustedRadius * 0.35f);
             for (float px = minX; px < maxX; px += step) rectPts.push_back({ px, minY });
             for (float py = minY; py < maxY; py += step) rectPts.push_back({ maxX, py });
             for (float px = maxX; px > minX; px -= step) rectPts.push_back({ px, maxY });
@@ -1429,10 +1484,11 @@ void EraseBrushAt(float x, float y, float radius) {
 }
 
 bool EraseWholeShapeAt(float x, float y, float radius) {
-    float rSq = radius * radius;
+    float adjustedRadius = radius / g_zoomScale;
+    float rSq = adjustedRadius * adjustedRadius;
     bool changed = false;
-    float adjustedX = x - g_panOffsetX;
-    float adjustedY = y - g_panOffsetY;
+    float adjustedX = (x - g_panOffsetX) / g_zoomScale;
+    float adjustedY = (y - g_panOffsetY) / g_zoomScale;
 
     for (auto it = g_strokes.begin(); it != g_strokes.end();) {
         bool hit = false;
@@ -1477,7 +1533,7 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
             float dy = adjustedY - cy;
             float dist = std::sqrt(dx * dx + dy * dy);
             float avgR = (rx + ry) * 0.5f;
-            if (std::abs(dist - avgR) <= radius) {
+            if (std::abs(dist - avgR) <= adjustedRadius) {
                 hit = true;
             }
         }
@@ -1595,6 +1651,7 @@ void CopySnapshotToClipboard() {
     ReleaseDC(NULL, hScreenDC);
 
     g_toastStartTime = GetTickCount64();
+    if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, 1, 30, NULL);
     InvalidateOverlay();
 }
 
@@ -1616,11 +1673,40 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         float step = (delta > 0) ? 1.0f : -1.0f;
 
+        POINT wheelPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hwnd, &wheelPt);
+        g_cursorX = (float)wheelPt.x;
+        g_cursorY = (float)wheelPt.y;
+
         // Holding Right-click OR in Eraser Mode: Scroll wheel resizes eraser radius!
         if (g_isRightMouseDown || g_isRightClickErasing || g_currentTool == ToolMode::Eraser) {
             g_wheelUsedWhileRightMouseDown = true;
             g_eraserRadius = std::max(6.0f, std::min(150.0f, g_eraserRadius + step * 3.0f));
             InvalidateOverlay();
+            return 0;
+        }
+
+        // Pan Mode / Holding Canvas: Scroll wheel zooms canvas in and out centered on cursor!
+        if (g_currentTool == ToolMode::Pan || g_isPanning) {
+            float notches = (float)delta / 120.0f;
+            float factor = std::pow(1.12f, notches);
+            float oldScale = g_zoomScale;
+            float newScale = std::max(0.15f, std::min(8.0f, oldScale * factor));
+
+            if (std::abs(newScale - oldScale) > 0.0005f) {
+                // Zoom centered on cursor:
+                g_panOffsetX = g_cursorX - (g_cursorX - g_panOffsetX) * (newScale / oldScale);
+                g_panOffsetY = g_cursorY - (g_cursorY - g_panOffsetY) * (newScale / oldScale);
+                g_zoomScale = newScale;
+
+                if (g_isPanning) {
+                    g_panStartPos = { (LONG)g_cursorX, (LONG)g_cursorY };
+                }
+
+                g_zoomPreviewTime = GetTickCount64();
+                SetTimer(hwnd, 1, 30, NULL);
+                InvalidateOverlay();
+            }
             return 0;
         }
 
@@ -1633,13 +1719,61 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_currentPenWidth = g_settings.defaultPenWidth;
         }
         g_sizePreviewTime = GetTickCount64();
+        SetTimer(hwnd, 1, 30, NULL);
         InvalidateOverlay();
+        return 0;
+    }
+
+    case WM_TIMER: {
+        if (wParam == 1) {
+            bool needTimer = false;
+            ULONGLONG now = GetTickCount64();
+            if (g_zoomPreviewTime != 0) {
+                if (now - g_zoomPreviewTime > 1100) {
+                    g_zoomPreviewTime = 0;
+                } else {
+                    needTimer = true;
+                }
+            }
+            if (g_sizePreviewTime != 0) {
+                if (now - g_sizePreviewTime > 900) {
+                    g_sizePreviewTime = 0;
+                } else {
+                    needTimer = true;
+                }
+            }
+            if (g_toastStartTime != 0) {
+                if (now - g_toastStartTime > 2000) {
+                    g_toastStartTime = 0;
+                } else {
+                    needTimer = true;
+                }
+            }
+            InvalidateOverlay();
+            if (!needTimer) {
+                KillTimer(hwnd, 1);
+            }
+        }
         return 0;
     }
 
     case WM_KEYDOWN: {
         if (wParam == VK_ESCAPE) {
             HideOverlay();
+            return 0;
+        }
+        if (((GetKeyState(VK_CONTROL) & 0x8000) && (wParam == '0' || wParam == VK_NUMPAD0)) ||
+            (wParam == '0' && g_currentTool == ToolMode::Pan)) {
+            // Reset Pan & Zoom to default (100% scale, 0 offset)
+            g_zoomScale = 1.0f;
+            g_panOffsetX = 0.0f;
+            g_panOffsetY = 0.0f;
+            if (g_isPanning) {
+                g_panStartPos = { (LONG)g_cursorX, (LONG)g_cursorY };
+            }
+            g_zoomPreviewTime = GetTickCount64();
+            SetTimer(hwnd, 1, 30, NULL);
+            InvalidateOverlay();
             return 0;
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') {
@@ -1836,8 +1970,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // Active Drawing
         if (g_isDrawing) {
-            float adjX = g_cursorX - g_panOffsetX;
-            float adjY = g_cursorY - g_panOffsetY;
+            float adjX = (g_cursorX - g_panOffsetX) / g_zoomScale;
+            float adjY = (g_cursorY - g_panOffsetY) / g_zoomScale;
 
             if (g_currentStroke.shapeType == ShapeType::Freehand) {
                 g_currentStroke.points.push_back({ adjX, adjY });
@@ -2001,8 +2135,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Start Drawing Stroke or Shape
             SetCapture(hwnd);
             g_isDrawing = true;
-            float adjX = x - g_panOffsetX;
-            float adjY = y - g_panOffsetY;
+            float adjX = (x - g_panOffsetX) / g_zoomScale;
+            float adjY = (y - g_panOffsetY) / g_zoomScale;
 
             g_currentStroke.points.clear();
             g_currentStroke.points.push_back({ adjX, adjY });
@@ -2224,8 +2358,11 @@ void HideOverlay() {
     g_wheelUsedWhileRightMouseDown = false;
 
     if (g_hOverlayWnd) {
+        KillTimer(g_hOverlayWnd, 1);
         ShowWindow(g_hOverlayWnd, SW_HIDE);
     }
+    g_zoomPreviewTime = 0;
+    g_sizePreviewTime = 0;
 }
 
 // ----------------------------------------------------------------------------

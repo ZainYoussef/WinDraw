@@ -583,6 +583,7 @@ static bool g_isDraggingToolbar = false;
 static POINT g_toolbarDragStart = { 0, 0 };
 static float g_toolbarCustomX = -1.0f;
 static float g_toolbarCustomY = -1.0f;
+static bool g_toolbarCollapsed = false;
 
 // Shapes Action Modal / Flyout State
 static bool g_shapesFlyoutOpen = false;
@@ -1040,6 +1041,54 @@ void BuildToolbarLayout(int screenW, int screenH) {
     g_toolbarButtons.clear();
     g_toolbarDividers.clear();
 
+    if (g_toolbarCollapsed) {
+        const float pillW = 82.0f;
+        const float pillH = 30.0f;
+
+        float startX = g_toolbarCustomX;
+        float startY = g_toolbarCustomY;
+
+        if (startX < 0.0f || startY < 0.0f) {
+            int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+            HMONITOR hPrimaryMon = MonitorFromWindow(NULL, MONITOR_DEFAULTTOPRIMARY);
+            MONITORINFO mi = { sizeof(MONITORINFO) };
+            if (hPrimaryMon && GetMonitorInfo(hPrimaryMon, &mi)) {
+                float clientLeft = (float)(mi.rcMonitor.left - vx);
+                float clientTop = (float)(mi.rcMonitor.top - vy);
+                float monW = (float)(mi.rcMonitor.right - mi.rcMonitor.left);
+                float monH = (float)(mi.rcMonitor.bottom - mi.rcMonitor.top);
+
+                if (startX < 0.0f) {
+                    startX = clientLeft + (monW - pillW) * 0.5f;
+                }
+                if (startY < 0.0f) {
+                    float workBottom = (float)(mi.rcWork.bottom - vy);
+                    startY = workBottom - pillH - 16.0f;
+                    if (startY + pillH > clientTop + monH - 8.0f) {
+                        startY = clientTop + monH - pillH - 8.0f;
+                    }
+                }
+            }
+            else {
+                if (startX < 0.0f) startX = (screenW - pillW) * 0.5f;
+                if (startY < 0.0f) startY = (screenH - pillH - 24.0f);
+            }
+        }
+
+        g_toolbarRect = D2D1::RectF(startX, startY, startX + pillW, startY + pillH);
+
+        ToolbarButton expandBtn;
+        expandBtn.id = 98;
+        expandBtn.isPen = false;
+        expandBtn.label = L"\uE70E"; // ChevronUp
+        expandBtn.shortcut = L"";
+        expandBtn.rect = g_toolbarRect;
+        g_toolbarButtons.push_back(expandBtn);
+        return;
+    }
+
     const float btnH = 34.0f;
     const float btnW = 34.0f;
     const float padY = 6.0f;
@@ -1186,7 +1235,16 @@ void BuildToolbarLayout(int screenW, int screenH) {
     g_toolbarDividers.push_back(curX + dividerGap * 0.5f);
     curX += dividerGap;
 
-    // Group 5: Exit
+    // Group 5: Minimize / Collapse & Exit
+    ToolbarButton minBtn;
+    minBtn.id = 98;
+    minBtn.isPen = false;
+    minBtn.label = L"\uE740"; // ChevronDown
+    minBtn.shortcut = L"B";
+    minBtn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
+    g_toolbarButtons.push_back(minBtn);
+    curX += btnW + itemGap;
+
     ToolbarButton exitBtn;
     exitBtn.id = 99;
     exitBtn.isPen = false;
@@ -1570,6 +1628,76 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.26f, 0.34f, 1.00f), &pBorderBrush);
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.48f, 0.60f, 0.50f), &pRimBrush);
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.88f, 0.92f, 1.00f), &pTextBrush);
+
+    if (g_toolbarCollapsed) {
+        bool isPillHovered = (g_hoveredToolbarBtn == 0 ||
+                              (g_cursorX >= g_toolbarRect.left && g_cursorX <= g_toolbarRect.right &&
+                               g_cursorY >= g_toolbarRect.top && g_cursorY <= g_toolbarRect.bottom));
+
+        float pillR = (g_toolbarRect.bottom - g_toolbarRect.top) * 0.5f; // 15.0f (fully rounded capsule)
+        D2D1_ROUNDED_RECT pillRoundRect = D2D1::RoundedRect(g_toolbarRect, pillR, pillR);
+
+        // Fill frosted dark acrylic
+        pRT->FillRoundedRectangle(pillRoundRect, pBgBrush);
+
+        // Border (mint glow if hovered, sleek subtle border otherwise)
+        ID2D1SolidColorBrush* pMintGlow = nullptr;
+        if (isPillHovered) {
+            pRT->CreateSolidColorBrush(D2D1::ColorF(0.32f, 0.85f, 0.69f, 1.0f), &pMintGlow);
+            pRT->DrawRoundedRectangle(pillRoundRect, pMintGlow, 1.8f);
+        } else {
+            pRT->DrawRoundedRectangle(pillRoundRect, pBorderBrush, 1.2f);
+        }
+
+        // Specular top rim highlight
+        if (pRimBrush) {
+            pRT->DrawLine(
+                D2D1::Point2F(g_toolbarRect.left + pillR, g_toolbarRect.top + 1.2f),
+                D2D1::Point2F(g_toolbarRect.right - pillR, g_toolbarRect.top + 1.2f),
+                pRimBrush, 1.0f
+            );
+        }
+
+        float midY = (g_toolbarRect.top + g_toolbarRect.bottom) * 0.5f;
+
+        // 1. Left: Gripper icon (GripperTool \uE75E)
+        if (g_pIconFormat && pTextBrush) {
+            D2D1_RECT_F gripR = D2D1::RectF(g_toolbarRect.left + 6.0f, g_toolbarRect.top, g_toolbarRect.left + 26.0f, g_toolbarRect.bottom);
+            pRT->DrawText(L"\uE75E", 1, g_pIconFormat, gripR, pTextBrush);
+        }
+
+        // 2. Middle: Active Tool / Color Swatch Dot (9px diameter)
+        float dotX = (g_toolbarRect.left + g_toolbarRect.right) * 0.5f - 2.0f;
+        float dotR = 4.5f;
+        if (g_activeColor.a < 0.99f) {
+            ID2D1SolidColorBrush* pDotBack = nullptr;
+            pRT->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.22f, 0.28f, 1.0f), &pDotBack);
+            if (pDotBack) {
+                pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dotX, midY), dotR, dotR), pDotBack);
+                pDotBack->Release();
+            }
+        }
+        ID2D1SolidColorBrush* pDotBrush = nullptr;
+        pRT->CreateSolidColorBrush(g_activeColor, &pDotBrush);
+        if (pDotBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dotX, midY), dotR, dotR), pDotBrush);
+            pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(dotX, midY), dotR, dotR), isPillHovered && pMintGlow ? pMintGlow : pBorderBrush, 1.0f);
+            pDotBrush->Release();
+        }
+
+        // 3. Right: Expand chevron glyph (\uE70E ChevronUp)
+        if (g_pIconFormat && pTextBrush) {
+            D2D1_RECT_F chevR = D2D1::RectF(g_toolbarRect.right - 28.0f, g_toolbarRect.top, g_toolbarRect.right - 8.0f, g_toolbarRect.bottom);
+            pRT->DrawText(L"\uE70E", 1, g_pIconFormat, chevR, isPillHovered && pMintGlow ? pMintGlow : pTextBrush);
+        }
+
+        if (pMintGlow) pMintGlow->Release();
+        if (pBgBrush) pBgBrush->Release();
+        if (pBorderBrush) pBorderBrush->Release();
+        if (pRimBrush) pRimBrush->Release();
+        if (pTextBrush) pTextBrush->Release();
+        return;
+    }
 
     float r = (float)g_settings.cornerRadius;
     D2D1_ROUNDED_RECT roundRect = D2D1::RoundedRect(g_toolbarRect, r, r);
@@ -4264,6 +4392,28 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             InvalidateOverlay();
             return 0;
         }
+        if (wParam == 'B') {
+            g_colorFlyoutOpen = false;
+            g_shapesFlyoutOpen = false;
+            g_gridFlyoutOpen = false;
+            g_toolbarCollapsed = !g_toolbarCollapsed;
+            int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if (!g_toolbarCollapsed) {
+                float pillCenterX = (g_toolbarRect.left + g_toolbarRect.right) * 0.5f;
+                g_toolbarCustomX = pillCenterX - 425.0f;
+                if (g_toolbarCustomX < 10.0f) g_toolbarCustomX = 10.0f;
+                if (g_toolbarCustomX + 850.0f > (float)vw - 10.0f) g_toolbarCustomX = (float)vw - 850.0f - 10.0f;
+                ShowToastNotification(L"Toolbar Expanded");
+            } else {
+                float oldCenterX = (g_toolbarRect.left + g_toolbarRect.right) * 0.5f;
+                g_toolbarCustomX = oldCenterX - 41.0f;
+                ShowToastNotification(L"Toolbar Collapsed");
+            }
+            BuildToolbarLayout(vw, vh);
+            InvalidateOverlay();
+            return 0;
+        }
         if (wParam == VK_OEM_4) { // '['
             if (g_currentTool == ToolMode::Laser) {
                 g_settings.laserTrailDuration = std::max(200, g_settings.laserTrailDuration - 100);
@@ -4369,6 +4519,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         // Toolbar Dragging
+        if (g_toolbarCollapsed && GetCapture() == hwnd && !g_isDraggingToolbar) {
+            if (DistanceSq(g_cursorX, g_cursorY, (float)g_toolbarDragStart.x, (float)g_toolbarDragStart.y) > 16.0f) {
+                g_isDraggingToolbar = true;
+            }
+        }
         if (g_isDraggingToolbar) {
             float dx = g_cursorX - g_toolbarDragStart.x;
             float dy = g_cursorY - g_toolbarDragStart.y;
@@ -5099,6 +5254,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
         }
 
+        // Collapsed Toolbar interaction: capture for drag or click-expand
+        if (g_toolbarCollapsed && g_settings.showBottomToolbar &&
+            x >= g_toolbarRect.left && x <= g_toolbarRect.right &&
+            y >= g_toolbarRect.top && y <= g_toolbarRect.bottom) {
+            g_isDraggingToolbar = false;
+            g_toolbarDragStart = { (LONG)x, (LONG)y };
+            SetCapture(hwnd);
+            return 0;
+        }
+
         // Toolbar Drag Handle Check
         if (g_hoveredToolbarBtn == 0 || (x >= g_toolbarRect.left && x <= g_toolbarRect.right && y >= g_toolbarRect.top && y <= g_toolbarRect.bottom && g_hoveredToolbarBtn == -1)) {
             g_isDraggingToolbar = true;
@@ -5245,6 +5410,18 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         g_strokes.clear();
                     }
                     break;
+                case 98: // Minimize / Collapse Toolbar into indicator pill
+                    g_colorFlyoutOpen = false;
+                    g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
+                    g_toolbarCollapsed = true;
+                    {
+                        float oldCenterX = (g_toolbarRect.left + g_toolbarRect.right) * 0.5f;
+                        g_toolbarCustomX = oldCenterX - 41.0f; // pillW * 0.5f
+                    }
+                    BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+                    InvalidateOverlay();
+                    return 0;
                 case 99: // Exit
                     g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
@@ -5360,6 +5537,26 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_isLeftClickErasing = false;
             g_hasPushedUndoForCurrentErase = false;
             InvalidateOverlay();
+            return 0;
+        }
+
+        if (g_toolbarCollapsed && GetCapture() == hwnd) {
+            ReleaseCapture();
+            if (!g_isDraggingToolbar) {
+                // Click on collapsed pill: Expand!
+                g_toolbarCollapsed = false;
+                float pillCenterX = (g_toolbarRect.left + g_toolbarRect.right) * 0.5f;
+                int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                g_toolbarCustomX = pillCenterX - 425.0f;
+                if (g_toolbarCustomX < 10.0f) g_toolbarCustomX = 10.0f;
+                if (g_toolbarCustomX + 850.0f > (float)vw - 10.0f) g_toolbarCustomX = (float)vw - 850.0f - 10.0f;
+                BuildToolbarLayout(vw, vh);
+                ShowToastNotification(L"Toolbar Expanded");
+                InvalidateOverlay();
+                return 0;
+            }
+            g_isDraggingToolbar = false;
             return 0;
         }
 
@@ -5524,7 +5721,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_settings.showBottomToolbar &&
                 pt.x >= g_toolbarRect.left && pt.x <= g_toolbarRect.right &&
                 pt.y >= g_toolbarRect.top && pt.y <= g_toolbarRect.bottom) {
-                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                SetCursor(LoadCursor(NULL, g_toolbarCollapsed ? IDC_HAND : IDC_ARROW));
                 return TRUE;
             }
             if (g_currentTool == ToolMode::Laser) {

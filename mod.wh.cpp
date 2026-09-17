@@ -316,12 +316,15 @@ static std::wstring g_toastMessage = L"";
 static ULONGLONG g_sizePreviewTime = 0;
 static ULONGLONG g_zoomPreviewTime = 0;
 
+#define WM_USER_TOGGLE_POINTER (WM_USER + 101)
+
 // ----------------------------------------------------------------------------
 // Forward Declarations
 // ----------------------------------------------------------------------------
 
 void ShowOverlay();
 void HideOverlay();
+void SetToolMode(ToolMode newMode);
 void CaptureDesktop();
 void ReleaseD2DResources();
 void InvalidateOverlay();
@@ -1655,12 +1658,58 @@ void CopySnapshotToClipboard() {
     InvalidateOverlay();
 }
 
+void SetToolMode(ToolMode newMode) {
+    if (g_currentTool == newMode) return;
+    ToolMode oldMode = g_currentTool;
+    g_currentTool = newMode;
+
+    if (g_hOverlayWnd) {
+        if (newMode == ToolMode::Pointer) {
+            // Enter Pointer (Click-Through) mode:
+            // Apply WS_EX_LAYERED | WS_EX_TRANSPARENT so mouse clicks pass through to background apps
+            LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
+            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT);
+            SetLayeredWindowAttributes(g_hOverlayWnd, 0, 255, LWA_ALPHA);
+            SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            SetTimer(g_hOverlayWnd, 2, 20, NULL);
+
+            g_toastMessage = L"Pointer Mode: Click-through active";
+            g_toastStartTime = GetTickCount64();
+            SetTimer(g_hOverlayWnd, 1, 30, NULL);
+        }
+        else if (oldMode == ToolMode::Pointer) {
+            // Exit Pointer mode:
+            KillTimer(g_hOverlayWnd, 2);
+            LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
+            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT));
+            SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+            g_toastMessage = L"Drawing Mode active";
+            g_toastStartTime = GetTickCount64();
+            SetTimer(g_hOverlayWnd, 1, 30, NULL);
+        }
+        InvalidateOverlay();
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Overlay Window Procedure
 // ----------------------------------------------------------------------------
 
 LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WM_USER_TOGGLE_POINTER: {
+        if (g_currentTool == ToolMode::Pointer) {
+            SetToolMode(ToolMode::Pen);
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+        }
+        else {
+            SetToolMode(ToolMode::Pointer);
+        }
+        return 0;
+    }
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
@@ -1753,6 +1802,49 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (!needTimer) {
                 KillTimer(hwnd, 1);
             }
+            return 0;
+        }
+        if (wParam == 2) {
+            // Pointer (Click-Through) mode: monitor mouse to allow interacting with the toolbar
+            if (g_currentTool == ToolMode::Pointer && g_bIsActive) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+
+                bool overToolbar = false;
+                if (g_settings.showBottomToolbar) {
+                    if (pt.x >= (g_toolbarRect.left - 6.0f) && pt.x <= (g_toolbarRect.right + 6.0f) &&
+                        pt.y >= (g_toolbarRect.top - 6.0f) && pt.y <= (g_toolbarRect.bottom + 6.0f)) {
+                        overToolbar = true;
+                    }
+                }
+
+                LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+                if (overToolbar) {
+                    // Over the toolbar: remove WS_EX_TRANSPARENT so user can hover and click buttons
+                    if (exStyle & WS_EX_TRANSPARENT) {
+                        SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+                        SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                        InvalidateOverlay();
+                    }
+                }
+                else {
+                    // Outside the toolbar: restore WS_EX_TRANSPARENT so clicks pass to apps underneath
+                    if (!(exStyle & WS_EX_TRANSPARENT)) {
+                        SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
+                        SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                    }
+                }
+            }
+            else {
+                KillTimer(hwnd, 2);
+                LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+                if (exStyle & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) {
+                    SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT));
+                    SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                }
+            }
+            return 0;
         }
         return 0;
     }
@@ -1808,10 +1900,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             CopySnapshotToClipboard();
             return 0;
         }
-        if (wParam == 'E') { g_currentTool = ToolMode::Eraser; InvalidateOverlay(); return 0; }
-        if (wParam == 'P') { g_currentTool = ToolMode::Pan; InvalidateOverlay(); return 0; }
-        if (wParam == 'M') { g_currentTool = ToolMode::Pointer; InvalidateOverlay(); return 0; }
-        if (wParam == 'H') { g_currentTool = ToolMode::Highlighter; InvalidateOverlay(); return 0; }
+        if (wParam == 'E') { SetToolMode(ToolMode::Eraser); return 0; }
+        if (wParam == 'P') { SetToolMode((g_currentTool == ToolMode::Pan) ? ToolMode::Pen : ToolMode::Pan); return 0; }
+        if (wParam == 'M') { SetToolMode((g_currentTool == ToolMode::Pointer) ? ToolMode::Pen : ToolMode::Pointer); return 0; }
+        if (wParam == 'H') { SetToolMode(ToolMode::Highlighter); return 0; }
         if (wParam == 'V') { g_inkVisible = !g_inkVisible; InvalidateOverlay(); return 0; }
         if (wParam == 'C') {
             if (!g_strokes.empty()) {
@@ -1821,16 +1913,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
-        if (wParam == 'F') { g_currentShape = ShapeType::Freehand; g_currentTool = ToolMode::Pen; InvalidateOverlay(); return 0; }
-        if (wParam == 'L') { g_currentShape = ShapeType::Line; g_currentTool = ToolMode::Pen; InvalidateOverlay(); return 0; }
-        if (wParam == 'A') { g_currentShape = ShapeType::Arrow; g_currentTool = ToolMode::Pen; InvalidateOverlay(); return 0; }
-        if (wParam == 'R') { g_currentShape = ShapeType::Rectangle; g_currentTool = ToolMode::Pen; InvalidateOverlay(); return 0; }
-        if (wParam == 'O') { g_currentShape = ShapeType::Ellipse; g_currentTool = ToolMode::Pen; InvalidateOverlay(); return 0; }
+        if (wParam == 'F') { g_currentShape = ShapeType::Freehand; SetToolMode(ToolMode::Pen); return 0; }
+        if (wParam == 'L') { g_currentShape = ShapeType::Line; SetToolMode(ToolMode::Pen); return 0; }
+        if (wParam == 'A') { g_currentShape = ShapeType::Arrow; SetToolMode(ToolMode::Pen); return 0; }
+        if (wParam == 'R') { g_currentShape = ShapeType::Rectangle; SetToolMode(ToolMode::Pen); return 0; }
+        if (wParam == 'O') { g_currentShape = ShapeType::Ellipse; SetToolMode(ToolMode::Pen); return 0; }
         if (wParam >= '1' && wParam <= '5') {
             int penIdx = (int)(wParam - '1');
             g_activeColor = kPresetColors[penIdx];
-            g_currentTool = ToolMode::Pen;
-            InvalidateOverlay();
+            SetToolMode(ToolMode::Pen);
             return 0;
         }
         if (wParam == VK_OEM_4) { // '['
@@ -2012,7 +2103,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 CopySnapshotToClipboard();
             }
             else if (g_radialHoverTarget == RadialTarget::Eraser) {
-                g_currentTool = ToolMode::Eraser;
+                SetToolMode(ToolMode::Eraser);
             }
             else if (g_radialHoverTarget == RadialTarget::Undo) {
                 if (!g_strokes.empty()) {
@@ -2021,20 +2112,20 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Pointer) {
-                g_currentTool = ToolMode::Pointer;
+                SetToolMode(ToolMode::Pointer);
             }
             else if (g_radialHoverTarget == RadialTarget::InkVisible) {
                 g_inkVisible = !g_inkVisible;
             }
             else if (g_radialHoverTarget == RadialTarget::Pan) {
-                g_currentTool = ToolMode::Pan;
+                SetToolMode(ToolMode::Pan);
             }
             else if (g_radialHoverTarget == RadialTarget::Draw) {
-                g_currentTool = ToolMode::Pen;
+                SetToolMode(ToolMode::Pen);
             }
             else if (g_radialHoverTarget == RadialTarget::ColorOrb && g_hoveredOrb >= 0 && g_hoveredOrb < (int)kPresetColorCount) {
                 g_activeColor = kPresetColors[g_hoveredOrb];
-                g_currentTool = ToolMode::Pen;
+                SetToolMode(ToolMode::Pen);
             }
 
             g_radialActive = false;
@@ -2053,35 +2144,51 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        // Toolbar Button Click
+        // Toolbar Button Click - verify button under (x, y)
+        if (g_settings.showBottomToolbar &&
+            x >= g_toolbarRect.left && x <= g_toolbarRect.right &&
+            y >= g_toolbarRect.top && y <= g_toolbarRect.bottom) {
+            for (size_t i = 0; i < g_toolbarButtons.size(); ++i) {
+                const auto& b = g_toolbarButtons[i].rect;
+                if (x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) {
+                    g_hoveredToolbarBtn = (int)i;
+                    break;
+                }
+            }
+        }
+
         if (g_hoveredToolbarBtn >= 0 && g_hoveredToolbarBtn < (int)g_toolbarButtons.size()) {
             const auto& btn = g_toolbarButtons[g_hoveredToolbarBtn];
             if (btn.isPen) {
                 g_activeColor = btn.penColor;
-                g_currentTool = ToolMode::Pen;
+                SetToolMode(ToolMode::Pen);
+                SetForegroundWindow(hwnd);
             }
             else {
                 switch (btn.id) {
                 case 1: // Highlighter
-                    g_currentTool = (g_currentTool == ToolMode::Highlighter) ? ToolMode::Pen : ToolMode::Highlighter;
+                    SetToolMode((g_currentTool == ToolMode::Highlighter) ? ToolMode::Pen : ToolMode::Highlighter);
+                    SetForegroundWindow(hwnd);
                     break;
                 case 2: // Eraser
-                    g_currentTool = (g_currentTool == ToolMode::Eraser) ? ToolMode::Pen : ToolMode::Eraser;
+                    SetToolMode((g_currentTool == ToolMode::Eraser) ? ToolMode::Pen : ToolMode::Eraser);
+                    SetForegroundWindow(hwnd);
                     break;
                 case 3: // Pan
-                    g_currentTool = (g_currentTool == ToolMode::Pan) ? ToolMode::Pen : ToolMode::Pan;
+                    SetToolMode((g_currentTool == ToolMode::Pan) ? ToolMode::Pen : ToolMode::Pan);
+                    SetForegroundWindow(hwnd);
                     break;
-                case 4: // Pointer
-                    g_currentTool = (g_currentTool == ToolMode::Pointer) ? ToolMode::Pen : ToolMode::Pointer;
+                case 4: // Pointer (Click-Through)
+                    SetToolMode((g_currentTool == ToolMode::Pointer) ? ToolMode::Pen : ToolMode::Pointer);
                     break;
                 case 5: // Eye Visibility
                     g_inkVisible = !g_inkVisible;
                     break;
-                case 20: g_currentShape = ShapeType::Freehand; g_currentTool = ToolMode::Pen; break;
-                case 21: g_currentShape = ShapeType::Line; g_currentTool = ToolMode::Pen; break;
-                case 22: g_currentShape = ShapeType::Arrow; g_currentTool = ToolMode::Pen; break;
-                case 23: g_currentShape = ShapeType::Rectangle; g_currentTool = ToolMode::Pen; break;
-                case 24: g_currentShape = ShapeType::Ellipse; g_currentTool = ToolMode::Pen; break;
+                case 20: g_currentShape = ShapeType::Freehand; SetToolMode(ToolMode::Pen); SetForegroundWindow(hwnd); break;
+                case 21: g_currentShape = ShapeType::Line; SetToolMode(ToolMode::Pen); SetForegroundWindow(hwnd); break;
+                case 22: g_currentShape = ShapeType::Arrow; SetToolMode(ToolMode::Pen); SetForegroundWindow(hwnd); break;
+                case 23: g_currentShape = ShapeType::Rectangle; SetToolMode(ToolMode::Pen); SetForegroundWindow(hwnd); break;
+                case 24: g_currentShape = ShapeType::Ellipse; SetToolMode(ToolMode::Pen); SetForegroundWindow(hwnd); break;
                 case 10: // Snapshot
                     CopySnapshotToClipboard();
                     break;
@@ -2249,8 +2356,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
             if (g_settings.showBottomToolbar &&
-                pt.x >= g_toolbarRect.left && pt.x <= g_toolbarRect.right &&
-                pt.y >= g_toolbarRect.top && pt.y <= g_toolbarRect.bottom) {
+                pt.x >= (g_toolbarRect.left - 6.0f) && pt.x <= (g_toolbarRect.right + 6.0f) &&
+                pt.y >= (g_toolbarRect.top - 6.0f) && pt.y <= (g_toolbarRect.bottom + 6.0f)) {
                 return HTCLIENT;
             }
             return HTTRANSPARENT;
@@ -2341,6 +2448,7 @@ void ShowOverlay() {
     SetForegroundWindow(g_hOverlayWnd);
     SetFocus(g_hOverlayWnd);
     g_bIsActive = true;
+    SetToolMode(ToolMode::Pen);
 
     InvalidateOverlay();
 }
@@ -2359,10 +2467,17 @@ void HideOverlay() {
 
     if (g_hOverlayWnd) {
         KillTimer(g_hOverlayWnd, 1);
+        KillTimer(g_hOverlayWnd, 2);
+        LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
+        if (exStyle & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) {
+            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT));
+            SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        }
         ShowWindow(g_hOverlayWnd, SW_HIDE);
     }
     g_zoomPreviewTime = 0;
     g_sizePreviewTime = 0;
+    g_currentTool = ToolMode::Pen;
 }
 
 // ----------------------------------------------------------------------------
@@ -2375,13 +2490,9 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (msg == WM_HOTKEY && wParam == kHotkeyId) {
         if (g_bIsActive) {
             // Toggling hotkey while active switches between click-through Mouse Pointer and Inking
-            if (g_currentTool == ToolMode::Pointer) {
-                g_currentTool = ToolMode::Pen;
+            if (g_hOverlayWnd) {
+                PostMessageW(g_hOverlayWnd, WM_USER_TOGGLE_POINTER, 0, 0);
             }
-            else {
-                g_currentTool = ToolMode::Pointer;
-            }
-            InvalidateOverlay();
         }
         else {
             ShowOverlay();

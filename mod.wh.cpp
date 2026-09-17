@@ -2,9 +2,10 @@
 // @id              windraw
 // @name            WinDraw - Screen Inking & Annotation
 // @description     All-in-one hardware-accelerated screen drawing, shapes, radial quick menu, floating toolbar, and screenshot tool for Windows.
-// @version         1.1.0
-// @author          Zain
-// @github          https://github.com/ZainYoussef/WinDraw
+// @version         1.0.0
+// @author          ZainYousef
+// @github          https://github.com/ZainYoussef
+// @homepage        https://github.com/ZainYoussef/WinDraw
 // @include         explorer.exe
 // @architecture    x86-64
 // @architecture    arm64

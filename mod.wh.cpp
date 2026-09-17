@@ -606,8 +606,39 @@ void BuildToolbarLayout(int screenW, int screenH) {
     curX += btnW + 6.0f;
 
     float barW = curX;
-    float startX = (g_toolbarCustomX >= 0) ? g_toolbarCustomX : (screenW - barW) * 0.5f;
-    float startY = (g_toolbarCustomY >= 0) ? g_toolbarCustomY : (screenH - barH - 24.0f);
+
+    // Default placement: centered at the bottom of the Primary / Main Screen
+    float startX = g_toolbarCustomX;
+    float startY = g_toolbarCustomY;
+
+    if (startX < 0.0f || startY < 0.0f) {
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+        HMONITOR hPrimaryMon = MonitorFromWindow(NULL, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi = { sizeof(MONITORINFO) };
+        if (hPrimaryMon && GetMonitorInfo(hPrimaryMon, &mi)) {
+            float clientLeft = (float)(mi.rcMonitor.left - vx);
+            float clientTop = (float)(mi.rcMonitor.top - vy);
+            float monW = (float)(mi.rcMonitor.right - mi.rcMonitor.left);
+            float monH = (float)(mi.rcMonitor.bottom - mi.rcMonitor.top);
+
+            if (startX < 0.0f) {
+                startX = clientLeft + (monW - barW) * 0.5f;
+            }
+            if (startY < 0.0f) {
+                float workBottom = (float)(mi.rcWork.bottom - vy);
+                startY = workBottom - barH - 16.0f;
+                if (startY + barH > clientTop + monH - 8.0f) {
+                    startY = clientTop + monH - barH - 8.0f;
+                }
+            }
+        }
+        else {
+            if (startX < 0.0f) startX = (screenW - barW) * 0.5f;
+            if (startY < 0.0f) startY = (screenH - barH - 24.0f);
+        }
+    }
 
     g_toolbarRect = D2D1::RectF(startX, startY, startX + barW, startY + barH);
 
@@ -1084,11 +1115,27 @@ void DrawToast(ID2D1HwndRenderTarget* pRT, int screenW, int screenH) {
 
     const float tw = 340.0f;
     const float th = 40.0f;
+
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    float toastX = (screenW - tw) * 0.5f;
+    float toastY = 40.0f;
+
+    HMONITOR hPrimaryMon = MonitorFromWindow(NULL, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi = { sizeof(MONITORINFO) };
+    if (hPrimaryMon && GetMonitorInfo(hPrimaryMon, &mi)) {
+        float clientLeft = (float)(mi.rcMonitor.left - vx);
+        float monW = (float)(mi.rcMonitor.right - mi.rcMonitor.left);
+        float workTop = (float)(mi.rcWork.top - vy);
+        toastX = clientLeft + (monW - tw) * 0.5f;
+        toastY = workTop + 24.0f;
+    }
+
     D2D1_RECT_F toastRect = D2D1::RectF(
-        (screenW - tw) * 0.5f,
-        40.0f,
-        (screenW + tw) * 0.5f,
-        40.0f + th
+        toastX,
+        toastY,
+        toastX + tw,
+        toastY + th
     );
 
     pRT->FillRoundedRectangle(D2D1::RoundedRect(toastRect, 6.0f, 6.0f), pBg);

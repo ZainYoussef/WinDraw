@@ -551,7 +551,9 @@ enum class RadialTarget {
     Draw = 7,        // 7: Draw / Pen
     Laser = 8,       // 8: Laser Pointer
     Center = 9,      // Center Hub
-    ColorOrb = 10    // Outer orbital colors
+    ColorOrb = 10,   // Outer orbital colors
+    RecentHub = 11,  // 12 o'clock Recent Colors expansion hub
+    RecentOrb = 12   // Layer 2 Recent Color satellite orbs
 };
 static bool g_radialActive = false;
 static float g_radialX = 0;
@@ -559,6 +561,8 @@ static float g_radialY = 0;
 static RadialTarget g_radialHoverTarget = RadialTarget::None;
 static int g_radialHoverSector = -1;
 static int g_hoveredOrb = -1;
+static bool g_radialRecentFanOpen = false;
+static int g_hoveredRecentOrb = -1; // 0..4
 
 // Toolbar State & Dragging
 struct ToolbarButton {
@@ -569,6 +573,7 @@ struct ToolbarButton {
     D2D1_COLOR_F penColor;
     bool isToggled;
     std::wstring shortcut;
+    bool isCustomColor = false;
 };
 static std::vector<ToolbarButton> g_toolbarButtons;
 static std::vector<float> g_toolbarDividers;
@@ -591,6 +596,109 @@ static ID2D1BitmapBrush* g_pGridBrush = nullptr;
 static bool g_gridFlyoutOpen = false;
 static D2D1_RECT_F g_gridFlyoutRect = { 0, 0, 0, 0 };
 static int g_hoveredGridFlyoutItem = -1;
+
+// Custom Color & Opacity Studio State
+struct CustomColorState {
+    float hue = 340.0f;       // 0.0 to 360.0 degrees
+    float sat = 0.70f;        // 0.0 to 1.0
+    float val = 0.85f;        // 0.0 to 1.0
+    float alpha = 1.00f;      // 0.05 to 1.00
+    D2D1_COLOR_F activeColor = D2D1::ColorF(0.85f, 0.25f, 0.45f, 1.0f);
+};
+static CustomColorState g_customColor;
+static std::vector<D2D1_COLOR_F> g_recentColors = {
+    D2D1::ColorF(0.92f, 0.22f, 0.22f, 1.0f), // Crimson Red
+    D2D1::ColorF(0.18f, 0.52f, 0.95f, 1.0f), // Cobalt Blue
+    D2D1::ColorF(0.20f, 0.78f, 0.35f, 1.0f), // Emerald Green
+    D2D1::ColorF(0.98f, 0.65f, 0.12f, 1.0f), // Amber Gold
+    D2D1::ColorF(0.65f, 0.28f, 0.92f, 1.0f)  // Violet Purple
+};
+static bool g_colorFlyoutOpen = false;
+static D2D1_RECT_F g_colorFlyoutRect = { 0, 0, 0, 0 };
+enum class ColorPickerDrag { None, SatValCanvas, HueBar, AlphaBar };
+static ColorPickerDrag g_pickerDrag = ColorPickerDrag::None;
+static bool g_isEyedropperActive = false;
+static int g_hoveredRecentSwatch = -1;
+static int g_hoveredColorStudioAction = -1; // 1: Eyedropper, 2: Copy Hex
+
+inline D2D1_COLOR_F HSVtoRGB(float h, float s, float v, float a = 1.0f) {
+    if (s <= 0.0001f) {
+        return D2D1::ColorF(v, v, v, a);
+    }
+    while (h < 0.0f) h += 360.0f;
+    while (h >= 360.0f) h -= 360.0f;
+    float hSector = h / 60.0f;
+    int i = (int)hSector;
+    float f = hSector - (float)i;
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - s * f);
+    float t = v * (1.0f - s * (1.0f - f));
+
+    switch (i) {
+        case 0: return D2D1::ColorF(v, t, p, a);
+        case 1: return D2D1::ColorF(q, v, p, a);
+        case 2: return D2D1::ColorF(p, v, t, a);
+        case 3: return D2D1::ColorF(p, q, v, a);
+        case 4: return D2D1::ColorF(t, p, v, a);
+        default: return D2D1::ColorF(v, p, q, a);
+    }
+}
+
+inline void RGBtoHSV(D2D1_COLOR_F c, float& h, float& s, float& v) {
+    float r = std::max(0.0f, std::min(1.0f, c.r));
+    float g = std::max(0.0f, std::min(1.0f, c.g));
+    float b = std::max(0.0f, std::min(1.0f, c.b));
+    float maxV = std::max(r, std::max(g, b));
+    float minV = std::min(r, std::min(g, b));
+    float delta = maxV - minV;
+    v = maxV;
+    if (maxV <= 0.0001f) {
+        s = 0.0f;
+        h = 0.0f;
+        return;
+    }
+    s = delta / maxV;
+    if (delta <= 0.0001f) {
+        h = 0.0f;
+        return;
+    }
+    if (std::abs(r - maxV) < 0.0001f) {
+        h = 60.0f * ((g - b) / delta);
+    } else if (std::abs(g - maxV) < 0.0001f) {
+        h = 60.0f * (2.0f + (b - r) / delta);
+    } else {
+        h = 60.0f * (4.0f + (r - g) / delta);
+    }
+    if (h < 0.0f) h += 360.0f;
+}
+
+inline void PushRecentColor(D2D1_COLOR_F c) {
+    for (auto it = g_recentColors.begin(); it != g_recentColors.end(); ++it) {
+        if (std::abs(it->r - c.r) < 0.015f &&
+            std::abs(it->g - c.g) < 0.015f &&
+            std::abs(it->b - c.b) < 0.015f &&
+            std::abs(it->a - c.a) < 0.02f) {
+            g_recentColors.erase(it);
+            break;
+        }
+    }
+    g_recentColors.insert(g_recentColors.begin(), c);
+    if (g_recentColors.size() > 5) g_recentColors.resize(5);
+}
+
+inline std::wstring ColorToHex(D2D1_COLOR_F c, bool includeAlpha = false) {
+    int r = (int)std::round(std::max(0.0f, std::min(1.0f, c.r)) * 255.0f);
+    int g = (int)std::round(std::max(0.0f, std::min(1.0f, c.g)) * 255.0f);
+    int b = (int)std::round(std::max(0.0f, std::min(1.0f, c.b)) * 255.0f);
+    int a = (int)std::round(std::max(0.0f, std::min(1.0f, c.a)) * 255.0f);
+    WCHAR buf[32];
+    if (includeAlpha || a < 255) {
+        wsprintfW(buf, L"#%02X%02X%02X%02X", r, g, b, a);
+    } else {
+        wsprintfW(buf, L"#%02X%02X%02X", r, g, b);
+    }
+    return std::wstring(buf);
+}
 
 // Toast feedback
 static ULONGLONG g_toastStartTime = 0;
@@ -655,6 +763,7 @@ void SetToolMode(ToolMode newMode);
 void CaptureDesktop();
 void ReleaseD2DResources();
 void InvalidateOverlay();
+void ShowToastNotification(const std::wstring& msg);
 void RenderOverlay();
 void DrawZoomPreview(ID2D1HwndRenderTarget* pRT);
 void CopySnapshotToClipboard();
@@ -672,6 +781,7 @@ void DrawSnippingOverlay(ID2D1HwndRenderTarget* pRT);
 void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT);
 void RebuildGridBrush();
 void DrawGridFlyout(ID2D1HwndRenderTarget* pRT);
+void DrawColorFlyout(ID2D1HwndRenderTarget* pRT);
 void DrawLaserTrail(ID2D1HwndRenderTarget* pRT);
 void DrawLaserCursor(ID2D1HwndRenderTarget* pRT);
 
@@ -887,6 +997,17 @@ void InvalidateOverlay() {
     }
 }
 
+void ShowToastNotification(const std::wstring& msg) {
+    if (g_settings.showToastNotifications) {
+        g_toastMessage = msg;
+        g_toastStartTime = GetTickCount64();
+        if (g_hOverlayWnd) {
+            SetTimer(g_hOverlayWnd, 1, 16, NULL);
+        }
+        InvalidateOverlay();
+    }
+}
+
 void PerformUndo() {
     if (!g_undoStack.empty()) {
         g_redoStack.push_back(std::move(g_strokes));
@@ -938,14 +1059,28 @@ void BuildToolbarLayout(int screenW, int screenH) {
     g_toolbarButtons.push_back(dockBtn);
     curX += 20.0f + itemGap;
 
-    // Group 1: Pens (5 Preset Swatches)
-    for (int i = 0; i < 5; ++i) {
+    // Group 1: Pens (4 Preset Swatches + 1 Custom Color Studio Button)
+    for (int i = 0; i < 4; ++i) {
         ToolbarButton btn;
         btn.id = 100 + i;
         btn.isPen = true;
         btn.penColor = kPresetColors[i];
         btn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
         btn.shortcut = std::to_wstring(i + 1);
+        btn.isCustomColor = false;
+        g_toolbarButtons.push_back(btn);
+        curX += btnW + itemGap;
+    }
+
+    // Button 5: Custom Color & Opacity Studio Button
+    {
+        ToolbarButton btn;
+        btn.id = 104;
+        btn.isPen = true;
+        btn.penColor = g_customColor.activeColor;
+        btn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
+        btn.shortcut = L"5";
+        btn.isCustomColor = true;
         g_toolbarButtons.push_back(btn);
         curX += btnW + itemGap;
     }
@@ -1464,16 +1599,31 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
 
         if (btn.isPen) {
             // Pen swatch
+            D2D1_ROUNDED_RECT penR = D2D1::RoundedRect(btn.rect, 4.0f, 4.0f);
+
+            // If custom color button and alpha < 1.0, draw subtle checkerboard under fill
+            if (btn.isCustomColor && btn.penColor.a < 0.99f) {
+                ID2D1SolidColorBrush* pCheckDark = nullptr;
+                pRT->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.22f, 0.28f, 1.0f), &pCheckDark);
+                if (pCheckDark) {
+                    pRT->FillRoundedRectangle(penR, pCheckDark);
+                    pCheckDark->Release();
+                }
+            }
+
             ID2D1SolidColorBrush* pPenBrush = nullptr;
             pRT->CreateSolidColorBrush(btn.penColor, &pPenBrush);
             if (pPenBrush) {
-                D2D1_ROUNDED_RECT penR = D2D1::RoundedRect(btn.rect, 4.0f, 4.0f);
                 pRT->FillRoundedRectangle(penR, pPenBrush);
 
                 bool isActivePen = (g_currentTool == ToolMode::Pen &&
                                     btn.penColor.r == g_activeColor.r &&
                                     btn.penColor.g == g_activeColor.g &&
-                                    btn.penColor.b == g_activeColor.b);
+                                    btn.penColor.b == g_activeColor.b &&
+                                    (!btn.isCustomColor || std::abs(btn.penColor.a - g_activeColor.a) < 0.03f));
+                if (btn.isCustomColor && g_colorFlyoutOpen) {
+                    isActivePen = true;
+                }
 
                 ID2D1SolidColorBrush* pPenBorder = nullptr;
                 if (isActivePen) {
@@ -1490,6 +1640,31 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                 }
                 if (pPenBorder) pPenBorder->Release();
                 pPenBrush->Release();
+            }
+
+            // 5th button: Custom color button shows a crisp plus icon to indicate it opens custom color picker
+            if (btn.isCustomColor) {
+                float cx = (btn.rect.left + btn.rect.right) * 0.5f;
+                float cy = (btn.rect.top + btn.rect.bottom) * 0.5f;
+                const float pLen = 5.0f;
+
+                // Contrast shadow behind plus icon
+                ID2D1SolidColorBrush* pPlusShadow = nullptr;
+                pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.70f), &pPlusShadow);
+                if (pPlusShadow) {
+                    pRT->DrawLine(D2D1::Point2F(cx - pLen, cy + 0.8f), D2D1::Point2F(cx + pLen, cy + 0.8f), pPlusShadow, 2.8f, g_pRoundStrokeStyle);
+                    pRT->DrawLine(D2D1::Point2F(cx, cy - pLen + 0.8f), D2D1::Point2F(cx, cy + pLen + 0.8f), pPlusShadow, 2.8f, g_pRoundStrokeStyle);
+                    pPlusShadow->Release();
+                }
+
+                // Crisp white plus icon
+                ID2D1SolidColorBrush* pPlusWhite = nullptr;
+                pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &pPlusWhite);
+                if (pPlusWhite) {
+                    pRT->DrawLine(D2D1::Point2F(cx - pLen, cy), D2D1::Point2F(cx + pLen, cy), pPlusWhite, 2.0f, g_pRoundStrokeStyle);
+                    pRT->DrawLine(D2D1::Point2F(cx, cy - pLen), D2D1::Point2F(cx, cy + pLen), pPlusWhite, 2.0f, g_pRoundStrokeStyle);
+                    pPlusWhite->Release();
+                }
             }
 
             // Draw really small shortcut badge on pen swatch (1..5)
@@ -1839,6 +2014,44 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
         bool isHovered = (g_hoveredOrb == (int)i);
         float orbR = isHovered ? 15.5f : 11.5f;
 
+        if (i == 0) {
+            // 12 o'clock Recent Colors Expansion Hub
+            bool isHubHovered = (g_radialHoverTarget == RadialTarget::RecentHub || isHovered);
+            orbR = isHubHovered ? 15.5f : 12.0f;
+            if (isHubHovered && pGlowBrush) {
+                pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox, oy), orbR + 4.0f, orbR + 4.0f), pGlowBrush);
+            }
+            ID2D1SolidColorBrush* pHubFill = nullptr;
+            pRT->CreateSolidColorBrush(g_customColor.activeColor, &pHubFill);
+            if (pHubFill) {
+                pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox, oy), orbR, orbR), pHubFill);
+                pHubFill->Release();
+            }
+            ID2D1SolidColorBrush* pHubBorder = nullptr;
+            pRT->CreateSolidColorBrush(isHubHovered ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &pHubBorder);
+            if (pHubBorder) {
+                pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(ox, oy), orbR, orbR), pHubBorder, isHubHovered ? 2.0f : 1.2f);
+                pHubBorder->Release();
+            }
+            // Draw crisp plus icon centered in the RecentHub orb
+            float plusLen = isHubHovered ? 5.5f : 4.5f;
+            ID2D1SolidColorBrush* pPlusShadow = nullptr;
+            pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &pPlusShadow);
+            if (pPlusShadow) {
+                pRT->DrawLine(D2D1::Point2F(ox - plusLen, oy + 0.8f), D2D1::Point2F(ox + plusLen, oy + 0.8f), pPlusShadow, 2.6f, g_pRoundStrokeStyle);
+                pRT->DrawLine(D2D1::Point2F(ox, oy - plusLen + 0.8f), D2D1::Point2F(ox, oy + plusLen + 0.8f), pPlusShadow, 2.6f, g_pRoundStrokeStyle);
+                pPlusShadow->Release();
+            }
+            ID2D1SolidColorBrush* pPlusWhite = nullptr;
+            pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &pPlusWhite);
+            if (pPlusWhite) {
+                pRT->DrawLine(D2D1::Point2F(ox - plusLen, oy), D2D1::Point2F(ox + plusLen, oy), pPlusWhite, 2.0f, g_pRoundStrokeStyle);
+                pRT->DrawLine(D2D1::Point2F(ox, oy - plusLen), D2D1::Point2F(ox, oy + plusLen), pPlusWhite, 2.0f, g_pRoundStrokeStyle);
+                pPlusWhite->Release();
+            }
+            continue;
+        }
+
         ID2D1SolidColorBrush* pOrbBrush = nullptr;
         pRT->CreateSolidColorBrush(kPresetColors[i], &pOrbBrush);
         if (pOrbBrush) {
@@ -1855,6 +2068,71 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
             }
 
             pOrbBrush->Release();
+        }
+    }
+
+    // 8. Layer 2: Radial Menu Satellite Arc (Recent 5 Colors)
+    if (g_radialRecentFanOpen) {
+        const float kSatelliteRadius = 162.0f;
+        const float kRad = 3.14159265358979323846f / 180.0f;
+        int numOrbs = std::min(5, (int)g_recentColors.size());
+
+        // Curved guide arc for satellite tier: starts exactly at orb 0 and ends exactly at last orb
+        if (numOrbs > 1) {
+            ID2D1PathGeometry* pArcGeom = nullptr;
+            if (g_pD2DFactory && SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pArcGeom))) {
+                ID2D1GeometrySink* pSink = nullptr;
+                if (SUCCEEDED(pArcGeom->Open(&pSink))) {
+                    float aStart = -90.0f * kRad + (float)(0 - 2) * (16.0f * kRad);
+                    float aEnd = -90.0f * kRad + (float)(numOrbs - 1 - 2) * (16.0f * kRad);
+                    pSink->BeginFigure(D2D1::Point2F(cx + std::cos(aStart) * kSatelliteRadius, cy + std::sin(aStart) * kSatelliteRadius), D2D1_FIGURE_BEGIN_HOLLOW);
+                    pSink->AddArc(D2D1::ArcSegment(
+                        D2D1::Point2F(cx + std::cos(aEnd) * kSatelliteRadius, cy + std::sin(aEnd) * kSatelliteRadius),
+                        D2D1::SizeF(kSatelliteRadius, kSatelliteRadius),
+                        0.0f,
+                        D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                        D2D1_ARC_SIZE_SMALL
+                    ));
+                pSink->EndFigure(D2D1_FIGURE_END_OPEN);
+                pSink->Close();
+                pSink->Release();
+
+                ID2D1SolidColorBrush* pArcBrush = nullptr;
+                pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.48f, 0.60f, 0.45f), &pArcBrush);
+                if (pArcBrush) {
+                    pRT->DrawGeometry(pArcGeom, pArcBrush, 1.2f);
+                    pArcBrush->Release();
+                }
+            }
+                pArcGeom->Release();
+            }
+        }
+
+        // Draw the 5 Recent Satellite Orbs
+        for (int j = 0; j < (int)g_recentColors.size() && j < 5; ++j) {
+            float angle = -90.0f * kRad + (float)(j - 2) * (16.0f * kRad);
+            float sx = cx + std::cos(angle) * kSatelliteRadius;
+            float sy = cy + std::sin(angle) * kSatelliteRadius;
+
+            bool isSatHovered = (g_hoveredRecentOrb == j);
+            float satR = isSatHovered ? 15.0f : 11.5f;
+
+            ID2D1SolidColorBrush* pSatBrush = nullptr;
+            pRT->CreateSolidColorBrush(g_recentColors[j], &pSatBrush);
+            if (pSatBrush) {
+                if (isSatHovered && pGlowBrush) {
+                    pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sx, sy), satR + 4.0f, satR + 4.0f), pGlowBrush);
+                }
+                pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sx, sy), satR, satR), pSatBrush);
+
+                ID2D1SolidColorBrush* pSatBorder = nullptr;
+                pRT->CreateSolidColorBrush(isSatHovered ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.40f), &pSatBorder);
+                if (pSatBorder) {
+                    pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(sx, sy), satR, satR), pSatBorder, isSatHovered ? 2.0f : 1.0f);
+                    pSatBorder->Release();
+                }
+                pSatBrush->Release();
+            }
         }
     }
 
@@ -2564,6 +2842,361 @@ void DrawGridFlyout(ID2D1HwndRenderTarget* pRT) {
     if (pBgBrush) pBgBrush->Release();
 }
 
+void DrawColorFlyout(ID2D1HwndRenderTarget* pRT) {
+    if (!g_colorFlyoutOpen || !g_settings.showBottomToolbar) return;
+
+    // 1. Locate the Custom Color button (id 104) on the toolbar
+    float btnAbsLeft = 0, btnAbsTop = 0, btnAbsRight = 0, btnAbsBottom = 0;
+    bool foundBtn = false;
+    for (const auto& btn : g_toolbarButtons) {
+        if (btn.id == 104) {
+            btnAbsLeft = btn.rect.left;
+            btnAbsTop = btn.rect.top;
+            btnAbsRight = btn.rect.right;
+            btnAbsBottom = btn.rect.bottom;
+            foundBtn = true;
+            break;
+        }
+    }
+    if (!foundBtn) return;
+
+    const float flyoutW = 244.0f;
+    const float flyoutH = 312.0f;
+
+    float flyoutX = (btnAbsLeft + btnAbsRight) * 0.5f - flyoutW * 0.5f;
+    if (flyoutX < 12.0f) flyoutX = 12.0f;
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    if (flyoutX + flyoutW > (float)vw - 12.0f) {
+        flyoutX = (float)vw - flyoutW - 12.0f;
+    }
+
+    float flyoutY = g_toolbarRect.top - flyoutH - 8.0f;
+    if (flyoutY < 12.0f) {
+        flyoutY = g_toolbarRect.bottom + 8.0f;
+    }
+
+    g_colorFlyoutRect = D2D1::RectF(flyoutX, flyoutY, flyoutX + flyoutW, flyoutY + flyoutH);
+
+    // Chassis brushes
+    ID2D1SolidColorBrush* pBgBrush = nullptr;
+    ID2D1SolidColorBrush* pBorderBrush = nullptr;
+    ID2D1SolidColorBrush* pRimBrush = nullptr;
+    ID2D1SolidColorBrush* pShadowBrush = nullptr;
+    ID2D1SolidColorBrush* pTextBrush = nullptr;
+    ID2D1SolidColorBrush* pMintBrush = nullptr;
+    ID2D1SolidColorBrush* pCardBgBrush = nullptr;
+
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.10f, 0.14f, 0.96f), &pBgBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.26f, 0.34f, 1.00f), &pBorderBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.48f, 0.60f, 0.50f), &pRimBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f), &pShadowBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.92f, 0.96f, 1.00f), &pTextBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.90f, 0.75f, 1.00f), &pMintBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.13f, 0.16f, 0.22f, 0.90f), &pCardBgBrush);
+
+    // Drop shadow
+    if (pShadowBrush) {
+        D2D1_ROUNDED_RECT shadowR = D2D1::RoundedRect(
+            D2D1::RectF(flyoutX + 2.0f, flyoutY + 2.0f, flyoutX + flyoutW + 2.0f, flyoutY + flyoutH + 2.0f),
+            8.0f, 8.0f
+        );
+        pRT->FillRoundedRectangle(shadowR, pShadowBrush);
+    }
+
+    // Modal background
+    D2D1_ROUNDED_RECT modalR = D2D1::RoundedRect(g_colorFlyoutRect, 8.0f, 8.0f);
+    if (pBgBrush) pRT->FillRoundedRectangle(modalR, pBgBrush);
+    if (pBorderBrush) pRT->DrawRoundedRectangle(modalR, pBorderBrush, 1.2f);
+    if (pRimBrush) {
+        pRT->DrawLine(
+            D2D1::Point2F(flyoutX + 8.0f, flyoutY + 1.5f),
+            D2D1::Point2F(flyoutX + flyoutW - 8.0f, flyoutY + 1.5f),
+            pRimBrush, 1.0f
+        );
+    }
+
+    const float padX = 14.0f;
+    const float contentW = flyoutW - padX * 2.0f; // 216.0f
+    float curY = flyoutY + 12.0f;
+
+    // 2. Recent Colors Bar (Top - 5 Swatches)
+    const float swatchDiam = 22.0f;
+    const float swatchGap = (contentW - 5.0f * swatchDiam) / 4.0f;
+    for (int k = 0; k < 5; ++k) {
+        float sx = flyoutX + padX + k * (swatchDiam + swatchGap) + swatchDiam * 0.5f;
+        float sy = curY + swatchDiam * 0.5f;
+        D2D1_COLOR_F c = (k < (int)g_recentColors.size()) ? g_recentColors[k] : D2D1::ColorF(0.2f, 0.2f, 0.2f, 1.0f);
+
+        bool isActive = (std::abs(c.r - g_activeColor.r) < 0.02f &&
+                         std::abs(c.g - g_activeColor.g) < 0.02f &&
+                         std::abs(c.b - g_activeColor.b) < 0.02f &&
+                         std::abs(c.a - g_activeColor.a) < 0.03f);
+        bool isHov = (g_hoveredRecentSwatch == k);
+
+        ID2D1SolidColorBrush* pSwBrush = nullptr;
+        pRT->CreateSolidColorBrush(c, &pSwBrush);
+        if (pSwBrush) {
+            if (isActive && pMintBrush) {
+                pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(sx, sy), swatchDiam * 0.5f + 2.5f, swatchDiam * 0.5f + 2.5f), pMintBrush, 2.0f);
+            }
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sx, sy), swatchDiam * 0.5f, swatchDiam * 0.5f), pSwBrush);
+            ID2D1SolidColorBrush* pSwBorder = nullptr;
+            pRT->CreateSolidColorBrush(isHov ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.9f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.4f), &pSwBorder);
+            if (pSwBorder) {
+                pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(sx, sy), swatchDiam * 0.5f, swatchDiam * 0.5f), pSwBorder, isHov ? 1.5f : 1.0f);
+                pSwBorder->Release();
+            }
+            pSwBrush->Release();
+        }
+    }
+    curY += swatchDiam + 10.0f;
+
+    // 3. 2D Saturation / Value Canvas
+    const float canvasH = 118.0f;
+    D2D1_RECT_F canvasRect = D2D1::RectF(flyoutX + padX, curY, flyoutX + padX + contentW, curY + canvasH);
+
+    // Horizontal linear gradient: White to pure Hue
+    ID2D1LinearGradientBrush* pHorizBrush = nullptr;
+    ID2D1GradientStopCollection* pHorizStops = nullptr;
+    D2D1_GRADIENT_STOP hStops[2];
+    hStops[0].position = 0.0f;
+    hStops[0].color = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+    hStops[1].position = 1.0f;
+    hStops[1].color = HSVtoRGB(g_customColor.hue, 1.0f, 1.0f, 1.0f);
+    if (SUCCEEDED(pRT->CreateGradientStopCollection(hStops, 2, &pHorizStops))) {
+        pRT->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(canvasRect.left, canvasRect.top), D2D1::Point2F(canvasRect.right, canvasRect.top)),
+            pHorizStops,
+            &pHorizBrush
+        );
+        pHorizStops->Release();
+    }
+    if (pHorizBrush) {
+        D2D1_ROUNDED_RECT cr = D2D1::RoundedRect(canvasRect, 6.0f, 6.0f);
+        pRT->FillRoundedRectangle(cr, pHorizBrush);
+        pHorizBrush->Release();
+    }
+
+    // Vertical linear gradient: Transparent to Black
+    ID2D1LinearGradientBrush* pVertBrush = nullptr;
+    ID2D1GradientStopCollection* pVertStops = nullptr;
+    D2D1_GRADIENT_STOP vStops[2];
+    vStops[0].position = 0.0f;
+    vStops[0].color = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f);
+    vStops[1].position = 1.0f;
+    vStops[1].color = D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f);
+    if (SUCCEEDED(pRT->CreateGradientStopCollection(vStops, 2, &pVertStops))) {
+        pRT->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(canvasRect.left, canvasRect.top), D2D1::Point2F(canvasRect.left, canvasRect.bottom)),
+            pVertStops,
+            &pVertBrush
+        );
+        pVertStops->Release();
+    }
+    if (pVertBrush) {
+        D2D1_ROUNDED_RECT cr = D2D1::RoundedRect(canvasRect, 6.0f, 6.0f);
+        pRT->FillRoundedRectangle(cr, pVertBrush);
+        pVertBrush->Release();
+    }
+
+    // Canvas border
+    D2D1_ROUNDED_RECT canvasBorderR = D2D1::RoundedRect(canvasRect, 6.0f, 6.0f);
+    pRT->DrawRoundedRectangle(canvasBorderR, pBorderBrush, 1.0f);
+
+    // Crosshair Reticle Ring
+    float retX = canvasRect.left + g_customColor.sat * contentW;
+    float retY = canvasRect.top + (1.0f - g_customColor.val) * canvasH;
+    retX = std::max(canvasRect.left, std::min(canvasRect.right, retX));
+    retY = std::max(canvasRect.top, std::min(canvasRect.bottom, retY));
+
+    ID2D1SolidColorBrush* pRetShadow = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f), &pRetShadow);
+    if (pRetShadow) {
+        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(retX, retY), 7.0f, 7.0f), pRetShadow, 2.5f);
+        pRetShadow->Release();
+    }
+    ID2D1SolidColorBrush* pRetWhite = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &pRetWhite);
+    if (pRetWhite) {
+        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(retX, retY), 6.0f, 6.0f), pRetWhite, 2.0f);
+        pRetWhite->Release();
+    }
+
+    curY += canvasH + 10.0f;
+
+    // 4. Rainbow Hue Slider Track
+    const float trackH = 12.0f;
+    D2D1_RECT_F hueRect = D2D1::RectF(flyoutX + padX, curY, flyoutX + padX + contentW, curY + trackH);
+    D2D1_GRADIENT_STOP hueStops[7] = {
+        { 0.000f, D2D1::ColorF(1.0f, 0.0f, 0.0f, 1.0f) },
+        { 0.166f, D2D1::ColorF(1.0f, 1.0f, 0.0f, 1.0f) },
+        { 0.333f, D2D1::ColorF(0.0f, 1.0f, 0.0f, 1.0f) },
+        { 0.500f, D2D1::ColorF(0.0f, 1.0f, 1.0f, 1.0f) },
+        { 0.666f, D2D1::ColorF(0.0f, 0.0f, 1.0f, 1.0f) },
+        { 0.833f, D2D1::ColorF(1.0f, 0.0f, 1.0f, 1.0f) },
+        { 1.000f, D2D1::ColorF(1.0f, 0.0f, 0.0f, 1.0f) }
+    };
+    ID2D1GradientStopCollection* pHueColl = nullptr;
+    if (SUCCEEDED(pRT->CreateGradientStopCollection(hueStops, 7, &pHueColl))) {
+        ID2D1LinearGradientBrush* pHueBrush = nullptr;
+        pRT->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(hueRect.left, hueRect.top), D2D1::Point2F(hueRect.right, hueRect.top)),
+            pHueColl, &pHueBrush
+        );
+        if (pHueBrush) {
+            D2D1_ROUNDED_RECT hr = D2D1::RoundedRect(hueRect, 6.0f, 6.0f);
+            pRT->FillRoundedRectangle(hr, pHueBrush);
+            pRT->DrawRoundedRectangle(hr, pBorderBrush, 1.0f);
+            pHueBrush->Release();
+        }
+        pHueColl->Release();
+    }
+
+    // Hue Thumb
+    float hThumbX = hueRect.left + (g_customColor.hue / 360.0f) * contentW;
+    float hThumbY = curY + trackH * 0.5f;
+    hThumbX = std::max(hueRect.left, std::min(hueRect.right, hThumbX));
+
+    ID2D1SolidColorBrush* pWhiteBrush = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &pWhiteBrush);
+    ID2D1SolidColorBrush* pHueColorBrush = nullptr;
+    pRT->CreateSolidColorBrush(HSVtoRGB(g_customColor.hue, 1.0f, 1.0f, 1.0f), &pHueColorBrush);
+    if (pWhiteBrush) {
+        pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(hThumbX, hThumbY), 8.0f, 8.0f), pWhiteBrush);
+        if (pHueColorBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(hThumbX, hThumbY), 5.5f, 5.5f), pHueColorBrush);
+            pHueColorBrush->Release();
+        }
+        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(hThumbX, hThumbY), 8.0f, 8.0f), pBorderBrush, 1.0f);
+        pWhiteBrush->Release();
+    }
+
+    curY += trackH + 10.0f;
+
+    // 5. Opacity / Alpha Slider Track
+    D2D1_RECT_F alphaRect = D2D1::RectF(flyoutX + padX, curY, flyoutX + padX + contentW, curY + trackH);
+    D2D1_ROUNDED_RECT ar = D2D1::RoundedRect(alphaRect, 6.0f, 6.0f);
+
+    ID2D1SolidColorBrush* pCheckDark = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.22f, 0.28f, 1.0f), &pCheckDark);
+    if (pCheckDark) {
+        pRT->FillRoundedRectangle(ar, pCheckDark);
+        pCheckDark->Release();
+    }
+
+    D2D1_COLOR_F pureRGB = HSVtoRGB(g_customColor.hue, g_customColor.sat, g_customColor.val, 1.0f);
+    D2D1_GRADIENT_STOP aStops[2];
+    aStops[0].position = 0.0f;
+    aStops[0].color = D2D1::ColorF(pureRGB.r, pureRGB.g, pureRGB.b, 0.05f);
+    aStops[1].position = 1.0f;
+    aStops[1].color = D2D1::ColorF(pureRGB.r, pureRGB.g, pureRGB.b, 1.0f);
+    ID2D1GradientStopCollection* pAColl = nullptr;
+    if (SUCCEEDED(pRT->CreateGradientStopCollection(aStops, 2, &pAColl))) {
+        ID2D1LinearGradientBrush* pABrush = nullptr;
+        pRT->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(alphaRect.left, alphaRect.top), D2D1::Point2F(alphaRect.right, alphaRect.top)),
+            pAColl, &pABrush
+        );
+        if (pABrush) {
+            pRT->FillRoundedRectangle(ar, pABrush);
+            pRT->DrawRoundedRectangle(ar, pBorderBrush, 1.0f);
+            pABrush->Release();
+        }
+        pAColl->Release();
+    }
+
+    // Alpha Thumb
+    float aThumbX = alphaRect.left + g_customColor.alpha * contentW;
+    float aThumbY = curY + trackH * 0.5f;
+    aThumbX = std::max(alphaRect.left, std::min(alphaRect.right, aThumbX));
+
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &pWhiteBrush);
+    ID2D1SolidColorBrush* pCurColorBrush = nullptr;
+    pRT->CreateSolidColorBrush(g_customColor.activeColor, &pCurColorBrush);
+    if (pWhiteBrush) {
+        pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(aThumbX, aThumbY), 8.0f, 8.0f), pWhiteBrush);
+        if (pCurColorBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(aThumbX, aThumbY), 5.5f, 5.5f), pCurColorBrush);
+        }
+        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(aThumbX, aThumbY), 8.0f, 8.0f), pBorderBrush, 1.0f);
+        pWhiteBrush->Release();
+    }
+
+    curY += trackH + 12.0f;
+
+    // 6. Bottom Tools Row (Hex readout, Preview Swatch, Eyedropper, Copy)
+    const float rowH = 30.0f;
+    const float hexW = 92.0f;
+    const float swatchBoxW = 32.0f;
+    const float btnBoxW = 32.0f;
+    const float gap = 8.0f;
+
+    // Hex Box
+    D2D1_RECT_F hexRect = D2D1::RectF(flyoutX + padX, curY, flyoutX + padX + hexW, curY + rowH);
+    D2D1_ROUNDED_RECT hexR = D2D1::RoundedRect(hexRect, 4.0f, 4.0f);
+    if (pCardBgBrush) pRT->FillRoundedRectangle(hexR, pCardBgBrush);
+    pRT->DrawRoundedRectangle(hexR, pBorderBrush, 1.0f);
+
+    std::wstring hexStr = ColorToHex(g_customColor.activeColor, false);
+    if (g_pMenuKeyFormat && pTextBrush) {
+        pRT->DrawText(hexStr.c_str(), (UINT32)hexStr.length(), g_pMenuKeyFormat,
+            D2D1::RectF(hexRect.left + 6.0f, hexRect.top + 6.0f, hexRect.right - 4.0f, hexRect.bottom - 4.0f),
+            pTextBrush);
+    }
+
+    // Preview Swatch Box
+    float swatchLeft = hexRect.right + gap;
+    D2D1_RECT_F prevRect = D2D1::RectF(swatchLeft, curY, swatchLeft + swatchBoxW, curY + rowH);
+    D2D1_ROUNDED_RECT prevR = D2D1::RoundedRect(prevRect, 4.0f, 4.0f);
+    if (pCurColorBrush) {
+        pRT->FillRoundedRectangle(prevR, pCurColorBrush);
+        pCurColorBrush->Release();
+    }
+    pRT->DrawRoundedRectangle(prevR, pBorderBrush, 1.0f);
+
+    // Eyedropper Button
+    float dropLeft = prevRect.right + gap;
+    D2D1_RECT_F dropRect = D2D1::RectF(dropLeft, curY, dropLeft + btnBoxW, curY + rowH);
+    D2D1_ROUNDED_RECT dropR = D2D1::RoundedRect(dropRect, 4.0f, 4.0f);
+    bool dropHov = (g_hoveredColorStudioAction == 1);
+    ID2D1SolidColorBrush* pBtnBg = nullptr;
+    pRT->CreateSolidColorBrush(dropHov ? D2D1::ColorF(0.22f, 0.28f, 0.38f, 0.90f) : D2D1::ColorF(0.13f, 0.16f, 0.22f, 0.90f), &pBtnBg);
+    if (pBtnBg) {
+        pRT->FillRoundedRectangle(dropR, pBtnBg);
+        pBtnBg->Release();
+    }
+    pRT->DrawRoundedRectangle(dropR, (g_isEyedropperActive && pMintBrush) ? pMintBrush : pBorderBrush, g_isEyedropperActive ? 1.8f : 1.0f);
+    if (g_pIconFormat && pTextBrush) {
+        pRT->DrawText(L"\uEF3C", 1, g_pIconFormat, dropRect,
+            (g_isEyedropperActive && pMintBrush) ? pMintBrush : pTextBrush);
+    }
+
+    // Copy Hex Button
+    float copyLeft = dropRect.right + gap;
+    D2D1_RECT_F copyRect = D2D1::RectF(copyLeft, curY, copyLeft + btnBoxW, curY + rowH);
+    D2D1_ROUNDED_RECT copyR = D2D1::RoundedRect(copyRect, 4.0f, 4.0f);
+    bool copyHov = (g_hoveredColorStudioAction == 2);
+    ID2D1SolidColorBrush* pCopyBg = nullptr;
+    pRT->CreateSolidColorBrush(copyHov ? D2D1::ColorF(0.22f, 0.28f, 0.38f, 0.90f) : D2D1::ColorF(0.13f, 0.16f, 0.22f, 0.90f), &pCopyBg);
+    if (pCopyBg) {
+        pRT->FillRoundedRectangle(copyR, pCopyBg);
+        pCopyBg->Release();
+    }
+    pRT->DrawRoundedRectangle(copyR, pBorderBrush, 1.0f);
+    if (g_pIconFormat && pTextBrush) {
+        pRT->DrawText(L"\uE8C8", 1, g_pIconFormat, copyRect, pTextBrush);
+    }
+
+    // Release chassis brushes
+    if (pBgBrush) pBgBrush->Release();
+    if (pBorderBrush) pBorderBrush->Release();
+    if (pRimBrush) pRimBrush->Release();
+    if (pShadowBrush) pShadowBrush->Release();
+    if (pTextBrush) pTextBrush->Release();
+    if (pMintBrush) pMintBrush->Release();
+    if (pCardBgBrush) pCardBgBrush->Release();
+}
+
 void DrawLaserTrail(ID2D1HwndRenderTarget* pRT) {
     if (g_laserStrokes.empty()) return;
     ULONGLONG now = GetTickCount64();
@@ -2671,6 +3304,11 @@ void DrawLaserCursor(ID2D1HwndRenderTarget* pRT) {
         g_cursorY >= g_gridFlyoutRect.top && g_cursorY <= g_gridFlyoutRect.bottom) {
         return;
     }
+    if (g_colorFlyoutOpen &&
+        g_cursorX >= g_colorFlyoutRect.left && g_cursorX <= g_colorFlyoutRect.right &&
+        g_cursorY >= g_colorFlyoutRect.top && g_cursorY <= g_colorFlyoutRect.bottom) {
+        return;
+    }
     if (g_settings.showBottomToolbar &&
         g_cursorX >= (g_toolbarRect.left - 4.0f) && g_cursorX <= (g_toolbarRect.right + 4.0f) &&
         g_cursorY >= (g_toolbarRect.top - 4.0f) && g_cursorY <= (g_toolbarRect.bottom + 4.0f)) {
@@ -2775,6 +3413,11 @@ void RenderOverlay() {
         // 5c. Grid Settings Action Modal (drawn on top of toolbar when open)
         if (g_gridFlyoutOpen) {
             DrawGridFlyout(g_pRenderTarget);
+        }
+
+        // 5d. Custom Color & Opacity Studio Modal (drawn on top of toolbar when open)
+        if (g_colorFlyoutOpen) {
+            DrawColorFlyout(g_pRenderTarget);
         }
 
         // 6. Circular Radial Quick Menu
@@ -3450,6 +4093,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     pt.y >= g_gridFlyoutRect.top && pt.y <= g_gridFlyoutRect.bottom) {
                     overInteractive = true;
                 }
+                if (g_colorFlyoutOpen &&
+                    pt.x >= g_colorFlyoutRect.left && pt.x <= g_colorFlyoutRect.right &&
+                    pt.y >= g_colorFlyoutRect.top && pt.y <= g_colorFlyoutRect.bottom) {
+                    overInteractive = true;
+                }
                 if (g_settings.showBottomToolbar) {
                     if (pt.x >= (g_toolbarRect.left - 6.0f) && pt.x <= (g_toolbarRect.right + 6.0f) &&
                         pt.y >= (g_toolbarRect.top - 6.0f) && pt.y <= (g_toolbarRect.bottom + 6.0f)) {
@@ -3592,10 +4240,28 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (wParam == 'R') { g_currentShape = ShapeType::Rectangle; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
         if (wParam == 'O') { g_currentShape = ShapeType::Ellipse; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
         if (wParam == 'T') { g_currentShape = ShapeType::Triangle; SetToolMode(ToolMode::Pen); g_shapesFlyoutOpen = false; g_gridFlyoutOpen = false; BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)); InvalidateOverlay(); return 0; }
-        if (wParam >= '1' && wParam <= '5') {
+        if (wParam == VK_ESCAPE) {
+            if (g_isEyedropperActive) {
+                g_isEyedropperActive = false;
+                InvalidateOverlay();
+                return 0;
+            }
+        }
+        if (wParam >= '1' && wParam <= '4') {
             int penIdx = (int)(wParam - '1');
             g_activeColor = kPresetColors[penIdx];
+            g_colorFlyoutOpen = false;
             SetToolMode(ToolMode::Pen);
+            InvalidateOverlay();
+            return 0;
+        }
+        if (wParam == '5') {
+            g_activeColor = g_customColor.activeColor;
+            g_colorFlyoutOpen = !g_colorFlyoutOpen;
+            g_shapesFlyoutOpen = false;
+            g_gridFlyoutOpen = false;
+            SetToolMode(ToolMode::Pen);
+            InvalidateOverlay();
             return 0;
         }
         if (wParam == VK_OEM_4) { // '['
@@ -3651,6 +4317,57 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        if (g_isEyedropperActive) {
+            POINT screenPt;
+            GetCursorPos(&screenPt);
+            HDC hdc = GetDC(NULL);
+            if (hdc) {
+                COLORREF cr = GetPixel(hdc, screenPt.x, screenPt.y);
+                ReleaseDC(NULL, hdc);
+                float r = (float)GetRValue(cr) / 255.0f;
+                float g = (float)GetGValue(cr) / 255.0f;
+                float b = (float)GetBValue(cr) / 255.0f;
+                g_customColor.activeColor = D2D1::ColorF(r, g, b, g_customColor.alpha);
+                RGBtoHSV(g_customColor.activeColor, g_customColor.hue, g_customColor.sat, g_customColor.val);
+                g_activeColor = g_customColor.activeColor;
+            }
+            InvalidateOverlay();
+            return 0;
+        }
+
+        // Color Picker Dragging
+        if (g_pickerDrag != ColorPickerDrag::None) {
+            const float padX = 14.0f;
+            const float contentW = (g_colorFlyoutRect.right - g_colorFlyoutRect.left) - padX * 2.0f;
+            float curY = g_colorFlyoutRect.top + 12.0f + 22.0f + 10.0f; // Top of canvas
+            const float canvasH = 118.0f;
+            const float trackH = 12.0f;
+
+            if (g_pickerDrag == ColorPickerDrag::SatValCanvas) {
+                float s = (g_cursorX - (g_colorFlyoutRect.left + padX)) / contentW;
+                s = std::max(0.0f, std::min(1.0f, s));
+                float v = 1.0f - (g_cursorY - curY) / canvasH;
+                v = std::max(0.0f, std::min(1.0f, v));
+                g_customColor.sat = s;
+                g_customColor.val = v;
+            }
+            else if (g_pickerDrag == ColorPickerDrag::HueBar) {
+                float h = ((g_cursorX - (g_colorFlyoutRect.left + padX)) / contentW) * 360.0f;
+                h = std::max(0.0f, std::min(360.0f, h));
+                g_customColor.hue = h;
+            }
+            else if (g_pickerDrag == ColorPickerDrag::AlphaBar) {
+                float a = (g_cursorX - (g_colorFlyoutRect.left + padX)) / contentW;
+                a = std::max(0.05f, std::min(1.0f, a));
+                g_customColor.alpha = a;
+            }
+
+            g_customColor.activeColor = HSVtoRGB(g_customColor.hue, g_customColor.sat, g_customColor.val, g_customColor.alpha);
+            g_activeColor = g_customColor.activeColor;
+            InvalidateOverlay();
+            return 0;
+        }
+
         // Toolbar Dragging
         if (g_isDraggingToolbar) {
             float dx = g_cursorX - g_toolbarDragStart.x;
@@ -3675,15 +4392,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             RadialTarget oldTarget = g_radialHoverTarget;
             int oldSector = g_radialHoverSector;
             int oldOrb = g_hoveredOrb;
+            int oldRecentOrb = g_hoveredRecentOrb;
 
             g_radialHoverTarget = RadialTarget::None;
             g_radialHoverSector = -1;
             g_hoveredOrb = -1;
+            g_hoveredRecentOrb = -1;
 
             if (dist <= 38.0f) {
                 g_radialHoverTarget = RadialTarget::Center;
+                g_radialRecentFanOpen = false;
             }
             else if (dist >= 44.0f && dist <= 102.0f) {
+                g_radialRecentFanOpen = false;
                 float angle = std::atan2(dy, dx);
                 if (angle < 0) angle += 2.0f * 3.14159265358979323846f;
                 const float kSecStep = (float)(2.0 * 3.14159265358979323846 / 9.0);
@@ -3695,21 +4416,46 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_radialHoverTarget = (RadialTarget)sector;
                 }
             }
-            else if (dist >= 110.0f && dist <= 146.0f) {
+            else if (dist >= 108.0f && dist <= 146.0f) {
                 const float kOrbitalRadius = 126.0f;
                 for (size_t i = 0; i < kPresetColorCount; ++i) {
                     float angle = (float)(i * (2.0 * 3.14159265358979323846 / kPresetColorCount) - 3.14159265358979323846 * 0.5);
                     float ox = g_radialX + std::cos(angle) * kOrbitalRadius;
                     float oy = g_radialY + std::sin(angle) * kOrbitalRadius;
                     if (DistanceSq(g_cursorX, g_cursorY, ox, oy) <= 18.0f * 18.0f) {
-                        g_hoveredOrb = (int)i;
-                        g_radialHoverTarget = RadialTarget::ColorOrb;
+                        if (i == 0) {
+                            g_radialHoverTarget = RadialTarget::RecentHub;
+                            g_radialRecentFanOpen = true;
+                        } else {
+                            g_hoveredOrb = (int)i;
+                            g_radialHoverTarget = RadialTarget::ColorOrb;
+                            g_radialRecentFanOpen = false;
+                        }
                         break;
                     }
                 }
             }
+            else if (dist >= 146.0f && dist <= 188.0f && g_radialRecentFanOpen) {
+                const float kSatelliteRadius = 162.0f;
+                const float kRad = 3.14159265358979323846f / 180.0f;
+                for (int j = 0; j < (int)g_recentColors.size() && j < 5; ++j) {
+                    float angle = -90.0f * kRad + (float)(j - 2) * (16.0f * kRad);
+                    float sx = g_radialX + std::cos(angle) * kSatelliteRadius;
+                    float sy = g_radialY + std::sin(angle) * kSatelliteRadius;
+                    if (DistanceSq(g_cursorX, g_cursorY, sx, sy) <= 18.0f * 18.0f) {
+                        g_hoveredRecentOrb = j;
+                        g_radialHoverTarget = RadialTarget::RecentOrb;
+                        break;
+                    }
+                }
+            }
+            else {
+                if (dist > 195.0f || dy > -20.0f || (dist > 102.0f && (dx < -120.0f || dx > 120.0f))) {
+                    g_radialRecentFanOpen = false;
+                }
+            }
 
-            if (oldTarget != g_radialHoverTarget || oldSector != g_radialHoverSector || oldOrb != g_hoveredOrb) {
+            if (oldTarget != g_radialHoverTarget || oldSector != g_radialHoverSector || oldOrb != g_hoveredOrb || oldRecentOrb != g_hoveredRecentOrb) {
                 InvalidateOverlay();
             }
             return 0;
@@ -3747,6 +4493,56 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             if (oldGridHover != g_hoveredGridFlyoutItem) {
+                InvalidateOverlay();
+            }
+        }
+
+        // Check Color Flyout Hover
+        if (g_colorFlyoutOpen) {
+            int oldSw = g_hoveredRecentSwatch;
+            int oldAct = g_hoveredColorStudioAction;
+            g_hoveredRecentSwatch = -1;
+            g_hoveredColorStudioAction = -1;
+
+            if (g_cursorX >= g_colorFlyoutRect.left && g_cursorX <= g_colorFlyoutRect.right &&
+                g_cursorY >= g_colorFlyoutRect.top && g_cursorY <= g_colorFlyoutRect.bottom) {
+
+                const float padX = 14.0f;
+                const float contentW = (g_colorFlyoutRect.right - g_colorFlyoutRect.left) - padX * 2.0f;
+                float curY = g_colorFlyoutRect.top + 12.0f;
+
+                // Test Recent Swatches
+                const float swatchDiam = 22.0f;
+                const float swatchGap = (contentW - 5.0f * swatchDiam) / 4.0f;
+                for (int k = 0; k < 5; ++k) {
+                    float sx = g_colorFlyoutRect.left + padX + k * (swatchDiam + swatchGap) + swatchDiam * 0.5f;
+                    float sy = curY + swatchDiam * 0.5f;
+                    if (DistanceSq(g_cursorX, g_cursorY, sx, sy) <= 14.0f * 14.0f) {
+                        g_hoveredRecentSwatch = k;
+                        break;
+                    }
+                }
+
+                // Test Eyedropper and Copy buttons
+                float bottomY = curY + swatchDiam + 10.0f + 118.0f + 10.0f + 12.0f + 10.0f + 12.0f + 12.0f;
+                float hexW = 92.0f;
+                float swatchBoxW = 32.0f;
+                float btnBoxW = 32.0f;
+                const float gap = 8.0f;
+
+                float dropLeft = g_colorFlyoutRect.left + padX + hexW + gap + swatchBoxW + gap;
+                float copyLeft = dropLeft + btnBoxW + gap;
+
+                if (g_cursorY >= bottomY && g_cursorY <= bottomY + 30.0f) {
+                    if (g_cursorX >= dropLeft && g_cursorX <= dropLeft + btnBoxW) {
+                        g_hoveredColorStudioAction = 1;
+                    } else if (g_cursorX >= copyLeft && g_cursorX <= copyLeft + btnBoxW) {
+                        g_hoveredColorStudioAction = 2;
+                    }
+                }
+            }
+
+            if (oldSw != g_hoveredRecentSwatch || oldAct != g_hoveredColorStudioAction) {
                 InvalidateOverlay();
             }
         }
@@ -3912,6 +4708,29 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        // Eyedropper Desktop Pixel Sampling
+        if (g_isEyedropperActive) {
+            POINT screenPt;
+            GetCursorPos(&screenPt);
+            HDC hdc = GetDC(NULL);
+            if (hdc) {
+                COLORREF cr = GetPixel(hdc, screenPt.x, screenPt.y);
+                ReleaseDC(NULL, hdc);
+                float r = (float)GetRValue(cr) / 255.0f;
+                float g = (float)GetGValue(cr) / 255.0f;
+                float b = (float)GetBValue(cr) / 255.0f;
+                g_customColor.activeColor = D2D1::ColorF(r, g, b, g_customColor.alpha);
+                RGBtoHSV(g_customColor.activeColor, g_customColor.hue, g_customColor.sat, g_customColor.val);
+                g_activeColor = g_customColor.activeColor;
+                PushRecentColor(g_activeColor);
+            }
+            g_isEyedropperActive = false;
+            ShowToastNotification(L"Color Sampled!");
+            BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            InvalidateOverlay();
+            return 0;
+        }
+
         // Snipping drag start
         if (g_isSnipping) {
             g_isSnippingDrag = true;
@@ -3973,11 +4792,29 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_activeColor = kPresetColors[g_hoveredOrb];
                 SetToolMode(ToolMode::Pen);
             }
+            else if (g_radialHoverTarget == RadialTarget::RecentOrb && g_hoveredRecentOrb >= 0 && g_hoveredRecentOrb < (int)g_recentColors.size()) {
+                g_activeColor = g_recentColors[g_hoveredRecentOrb];
+                g_customColor.activeColor = g_activeColor;
+                RGBtoHSV(g_activeColor, g_customColor.hue, g_customColor.sat, g_customColor.val);
+                g_customColor.alpha = g_activeColor.a;
+                SetToolMode(ToolMode::Pen);
+                BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            }
+            else if (g_radialHoverTarget == RadialTarget::RecentHub) {
+                g_colorFlyoutOpen = !g_colorFlyoutOpen;
+                g_shapesFlyoutOpen = false;
+                g_gridFlyoutOpen = false;
+                g_activeColor = g_customColor.activeColor;
+                SetToolMode(ToolMode::Pen);
+                BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            }
 
             g_radialActive = false;
             g_radialHoverTarget = RadialTarget::None;
             g_radialHoverSector = -1;
             g_hoveredOrb = -1;
+            g_hoveredRecentOrb = -1;
+            g_radialRecentFanOpen = false;
             InvalidateOverlay();
             return 0;
         }
@@ -4111,6 +4948,157 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
         }
 
+        // Color Studio Flyout Selection & Interaction
+        if (g_colorFlyoutOpen) {
+            if (x >= g_colorFlyoutRect.left && x <= g_colorFlyoutRect.right &&
+                y >= g_colorFlyoutRect.top && y <= g_colorFlyoutRect.bottom) {
+
+                const float padX = 14.0f;
+                const float contentW = (g_colorFlyoutRect.right - g_colorFlyoutRect.left) - padX * 2.0f;
+                float curY = g_colorFlyoutRect.top + 12.0f;
+
+                // 1. Recent Colors Swatches
+                const float swatchDiam = 22.0f;
+                const float swatchGap = (contentW - 5.0f * swatchDiam) / 4.0f;
+                for (int k = 0; k < 5; ++k) {
+                    float sx = g_colorFlyoutRect.left + padX + k * (swatchDiam + swatchGap) + swatchDiam * 0.5f;
+                    float sy = curY + swatchDiam * 0.5f;
+                    if (DistanceSq(x, y, sx, sy) <= 14.0f * 14.0f) {
+                        if (k < (int)g_recentColors.size()) {
+                            g_customColor.activeColor = g_recentColors[k];
+                            RGBtoHSV(g_customColor.activeColor, g_customColor.hue, g_customColor.sat, g_customColor.val);
+                            g_customColor.alpha = g_customColor.activeColor.a;
+                            g_activeColor = g_customColor.activeColor;
+                            SetToolMode(ToolMode::Pen);
+                            BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+                            InvalidateOverlay();
+                        }
+                        return 0;
+                    }
+                }
+                curY += swatchDiam + 10.0f;
+
+                // 2. 2D Saturation / Value Canvas
+                const float canvasH = 118.0f;
+                if (x >= (g_colorFlyoutRect.left + padX) && x <= (g_colorFlyoutRect.right - padX) &&
+                    y >= curY && y <= curY + canvasH) {
+                    g_pickerDrag = ColorPickerDrag::SatValCanvas;
+                    SetCapture(hwnd);
+                    float s = (x - (g_colorFlyoutRect.left + padX)) / contentW;
+                    float v = 1.0f - (y - curY) / canvasH;
+                    g_customColor.sat = std::max(0.0f, std::min(1.0f, s));
+                    g_customColor.val = std::max(0.0f, std::min(1.0f, v));
+                    g_customColor.activeColor = HSVtoRGB(g_customColor.hue, g_customColor.sat, g_customColor.val, g_customColor.alpha);
+                    g_activeColor = g_customColor.activeColor;
+                    InvalidateOverlay();
+                    return 0;
+                }
+                curY += canvasH + 10.0f;
+
+                // 3. Rainbow Hue Track
+                const float trackH = 12.0f;
+                if (x >= (g_colorFlyoutRect.left + padX) && x <= (g_colorFlyoutRect.right - padX) &&
+                    y >= (curY - 3.0f) && y <= (curY + trackH + 3.0f)) {
+                    g_pickerDrag = ColorPickerDrag::HueBar;
+                    SetCapture(hwnd);
+                    float h = ((x - (g_colorFlyoutRect.left + padX)) / contentW) * 360.0f;
+                    g_customColor.hue = std::max(0.0f, std::min(360.0f, h));
+                    g_customColor.activeColor = HSVtoRGB(g_customColor.hue, g_customColor.sat, g_customColor.val, g_customColor.alpha);
+                    g_activeColor = g_customColor.activeColor;
+                    InvalidateOverlay();
+                    return 0;
+                }
+                curY += trackH + 10.0f;
+
+                // 4. Alpha Track
+                if (x >= (g_colorFlyoutRect.left + padX) && x <= (g_colorFlyoutRect.right - padX) &&
+                    y >= (curY - 3.0f) && y <= (curY + trackH + 3.0f)) {
+                    g_pickerDrag = ColorPickerDrag::AlphaBar;
+                    SetCapture(hwnd);
+                    float a = (x - (g_colorFlyoutRect.left + padX)) / contentW;
+                    g_customColor.alpha = std::max(0.05f, std::min(1.0f, a));
+                    g_customColor.activeColor = HSVtoRGB(g_customColor.hue, g_customColor.sat, g_customColor.val, g_customColor.alpha);
+                    g_activeColor = g_customColor.activeColor;
+                    InvalidateOverlay();
+                    return 0;
+                }
+                curY += trackH + 12.0f;
+
+                // 5. Bottom Row: Hex box, Eyedropper, Copy
+                const float rowH = 30.0f;
+                const float hexW = 92.0f;
+                const float swatchBoxW = 32.0f;
+                const float btnBoxW = 32.0f;
+                const float gap = 8.0f;
+
+                float dropLeft = g_colorFlyoutRect.left + padX + hexW + gap + swatchBoxW + gap;
+                float copyLeft = dropLeft + btnBoxW + gap;
+
+                if (y >= curY && y <= curY + rowH) {
+                    if (x >= dropLeft && x <= dropLeft + btnBoxW) {
+                        // Eyedropper activate
+                        g_isEyedropperActive = true;
+                        SetCursor(LoadCursor(NULL, IDC_CROSS));
+                        InvalidateOverlay();
+                        return 0;
+                    }
+                    else if ((x >= copyLeft && x <= copyLeft + btnBoxW) ||
+                             (x >= (g_colorFlyoutRect.left + padX) && x <= (g_colorFlyoutRect.left + padX + hexW))) {
+                        // Copy Hex code to clipboard
+                        std::wstring hexStr = ColorToHex(g_customColor.activeColor, false);
+                        if (OpenClipboard(hwnd)) {
+                            EmptyClipboard();
+                            size_t lenBytes = (hexStr.length() + 1) * sizeof(wchar_t);
+                            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, lenBytes);
+                            if (hMem) {
+                                void* pLock = GlobalLock(hMem);
+                                if (pLock) {
+                                    memcpy(pLock, hexStr.c_str(), lenBytes);
+                                    GlobalUnlock(hMem);
+                                    SetClipboardData(CF_UNICODETEXT, hMem);
+                                }
+                            }
+                            CloseClipboard();
+                        }
+                        ShowToastNotification(L"Hex Copied!");
+                        InvalidateOverlay();
+                        return 0;
+                    }
+                }
+
+                // Any other click inside flyout modal is swallowed
+                return 0;
+            }
+            else {
+                // Click was outside Color Flyout
+                g_colorFlyoutOpen = false;
+                InvalidateOverlay();
+
+                // If user clicked directly on Custom Color button (id 104), dismiss without re-opening
+                bool clickedCustomColorBtn = false;
+                if (g_settings.showBottomToolbar &&
+                    x >= g_toolbarRect.left && x <= g_toolbarRect.right &&
+                    y >= g_toolbarRect.top && y <= g_toolbarRect.bottom) {
+                    for (const auto& b : g_toolbarButtons) {
+                        if (b.id == 104 && x >= b.rect.left && x <= b.rect.right && y >= b.rect.top && y <= b.rect.bottom) {
+                            clickedCustomColorBtn = true;
+                            break;
+                        }
+                    }
+                }
+                if (clickedCustomColorBtn) {
+                    return 0;
+                }
+
+                // If clicked on canvas outside toolbar, swallow to prevent accidental inking
+                if (!(g_settings.showBottomToolbar &&
+                      x >= g_toolbarRect.left && x <= g_toolbarRect.right &&
+                      y >= g_toolbarRect.top && y <= g_toolbarRect.bottom)) {
+                    return 0;
+                }
+            }
+        }
+
         // Toolbar Drag Handle Check
         if (g_hoveredToolbarBtn == 0 || (x >= g_toolbarRect.left && x <= g_toolbarRect.right && y >= g_toolbarRect.top && y <= g_toolbarRect.bottom && g_hoveredToolbarBtn == -1)) {
             g_isDraggingToolbar = true;
@@ -4142,54 +5130,73 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             if (btn.isPen) {
-                g_activeColor = btn.penColor;
-                g_shapesFlyoutOpen = false;
-                g_gridFlyoutOpen = false;
-                SetToolMode(ToolMode::Pen);
-                SetForegroundWindow(hwnd);
+                if (btn.isCustomColor) {
+                    g_colorFlyoutOpen = !g_colorFlyoutOpen;
+                    g_activeColor = g_customColor.activeColor;
+                    g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
+                    SetToolMode(ToolMode::Pen);
+                    SetForegroundWindow(hwnd);
+                }
+                else {
+                    g_colorFlyoutOpen = false;
+                    g_activeColor = btn.penColor;
+                    g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
+                    SetToolMode(ToolMode::Pen);
+                    SetForegroundWindow(hwnd);
+                }
             }
             else {
                 switch (btn.id) {
                 case 1: // Highlighter
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Highlighter) ? ToolMode::Pen : ToolMode::Highlighter);
                     SetForegroundWindow(hwnd);
                     break;
                 case 7: // Laser Pointer
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Laser) ? ToolMode::Pen : ToolMode::Laser);
                     SetForegroundWindow(hwnd);
                     break;
                 case 2: // Eraser
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Eraser) ? ToolMode::Pen : ToolMode::Eraser);
                     SetForegroundWindow(hwnd);
                     break;
                 case 3: // Pan
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Pan) ? ToolMode::Pen : ToolMode::Pan);
                     SetForegroundWindow(hwnd);
                     break;
                 case 4: // Pointer (Click-Through)
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     SetToolMode((g_currentTool == ToolMode::Pointer) ? ToolMode::Pen : ToolMode::Pointer);
                     break;
                 case 5: // Eye Visibility
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     g_inkVisible = !g_inkVisible;
                     break;
                 case 6: // Grid Settings Flyout Modal
+                    g_colorFlyoutOpen = false;
                     g_gridFlyoutOpen = !g_gridFlyoutOpen;
                     g_shapesFlyoutOpen = false;
                     SetForegroundWindow(hwnd);
                     break;
                 case 20: // Freehand
+                    g_colorFlyoutOpen = false;
                     g_currentShape = ShapeType::Freehand;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
@@ -4198,6 +5205,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     SetForegroundWindow(hwnd);
                     break;
                 case 25: // Shapes Action Modal Toggle
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = !g_shapesFlyoutOpen;
                     g_gridFlyoutOpen = false;
                     if (g_shapesFlyoutOpen) {
@@ -4206,6 +5214,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     SetForegroundWindow(hwnd);
                     break;
                 case 10: // Snapshot
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     if (GetKeyState(VK_SHIFT) & 0x8000) {
@@ -4216,16 +5225,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                     break;
                 case 11: // Undo
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     PerformUndo();
                     break;
                 case 12: // Redo
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     PerformRedo();
                     break;
                 case 13: // Clear
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     if (!g_strokes.empty()) {
@@ -4234,6 +5246,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                     break;
                 case 99: // Exit
+                    g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     HideOverlay();
@@ -4300,6 +5313,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_LBUTTONUP: {
+        if (g_pickerDrag != ColorPickerDrag::None) {
+            ReleaseCapture();
+            g_pickerDrag = ColorPickerDrag::None;
+            PushRecentColor(g_customColor.activeColor);
+            BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            InvalidateOverlay();
+            return 0;
+        }
+
         if (g_isSnipping) {
             if (g_isSnippingDrag) {
                 ReleaseCapture();
@@ -4441,6 +5463,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 pt.y >= g_gridFlyoutRect.top && pt.y <= g_gridFlyoutRect.bottom) {
                 return HTCLIENT;
             }
+            if (g_colorFlyoutOpen &&
+                pt.x >= g_colorFlyoutRect.left && pt.x <= g_colorFlyoutRect.right &&
+                pt.y >= g_colorFlyoutRect.top && pt.y <= g_colorFlyoutRect.bottom) {
+                return HTCLIENT;
+            }
             if (g_settings.showBottomToolbar &&
                 pt.x >= (g_toolbarRect.left - 6.0f) && pt.x <= (g_toolbarRect.right + 6.0f) &&
                 pt.y >= (g_toolbarRect.top - 6.0f) && pt.y <= (g_toolbarRect.bottom + 6.0f)) {
@@ -4453,6 +5480,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_SETCURSOR: {
         if (LOWORD(lParam) == HTCLIENT) {
+            if (g_isEyedropperActive) {
+                SetCursor(LoadCursor(NULL, IDC_CROSS));
+                return TRUE;
+            }
             if (g_isSnipping) {
                 SetCursor(LoadCursor(NULL, IDC_CROSS));
                 return TRUE;
@@ -4481,6 +5512,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_gridFlyoutOpen &&
                 pt.x >= g_gridFlyoutRect.left && pt.x <= g_gridFlyoutRect.right &&
                 pt.y >= g_gridFlyoutRect.top && pt.y <= g_gridFlyoutRect.bottom) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            if (g_colorFlyoutOpen &&
+                pt.x >= g_colorFlyoutRect.left && pt.x <= g_colorFlyoutRect.right &&
+                pt.y >= g_colorFlyoutRect.top && pt.y <= g_colorFlyoutRect.bottom) {
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 return TRUE;
             }
@@ -4567,6 +5604,13 @@ void ShowOverlay() {
     g_hoveredShapeFlyoutItem = -1;
     g_gridFlyoutOpen = false;
     g_hoveredGridFlyoutItem = -1;
+    g_colorFlyoutOpen = false;
+    g_isEyedropperActive = false;
+    g_pickerDrag = ColorPickerDrag::None;
+    g_radialRecentFanOpen = false;
+    g_hoveredRecentOrb = -1;
+    g_hoveredRecentSwatch = -1;
+    g_hoveredColorStudioAction = -1;
     g_lastOverlayOpenTime = GetTickCount64();
 
     ShowWindow(g_hOverlayWnd, SW_SHOW);
@@ -4592,6 +5636,13 @@ void HideOverlay() {
     g_hoveredShapeFlyoutItem = -1;
     g_gridFlyoutOpen = false;
     g_hoveredGridFlyoutItem = -1;
+    g_colorFlyoutOpen = false;
+    g_isEyedropperActive = false;
+    g_pickerDrag = ColorPickerDrag::None;
+    g_radialRecentFanOpen = false;
+    g_hoveredRecentOrb = -1;
+    g_hoveredRecentSwatch = -1;
+    g_hoveredColorStudioAction = -1;
     g_radialActive = false;
     g_isDrawing = false;
     g_isPanning = false;

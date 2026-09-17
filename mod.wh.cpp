@@ -6,6 +6,7 @@
 // @author          Zain
 // @github          https://github.com/ZainYoussef/WinDraw
 // @include         explorer.exe
+// @architecture    x86-64, arm64
 // @compilerOptions -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ldwmapi -lcomctl32 -lshlwapi -lwindowscodecs -lshell32
 // @license         MIT
 // ==/WindhawkMod==
@@ -17,51 +18,103 @@
 A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite running directly inside `explorer.exe` powered by **Direct2D**, **DirectWrite**, and **Windows Imaging Component (WIC)**.
 
 ### Complete Feature Set:
-1. **Activation & Dismissal**:
-   - Press **`Ctrl + Alt + G`** (customizable) anywhere in Windows to begin annotating immediately.
-   - Press **`ESC`** or click the **`✕`** Exit button to dismiss overlay.
 
-2. **Hardware-Accelerated Inking**:
+1. **Instant Activation & Dismissal**:
+   - Press **`Ctrl + Alt + G`** (customizable) anywhere in Windows to begin annotating immediately.
+   - Press **`ESC`** or click the **`✕`** Exit button to dismiss the overlay.
+
+2. **Hardware-Accelerated Inking & Brushes**:
    - 144Hz+ butter-smooth Direct2D drawing with quadratic Bézier curve interpolation.
-   - Highlighter mode with alpha-blending transparency.
-   - Mouse wheel dynamically resizes pen thickness with a visual circular indicator.
+   - **Pen Mode** (`F` key): Solid color inking with subpixel accuracy.
+   - **Highlighter Mode** (`H` key): Translucent alpha-blended highlighting.
+   - Mouse wheel or **`[`** / **`]`** keys dynamically resize brush thickness with a real-time 1:1 circular indicator dot showing active color and zoom level.
 
 3. **Shapes & Geometry**:
-   - **Freehand** inking (`F` key).
-   - **Straight Line** (`L` key).
-   - **Arrow** (`A` key) with automatically oriented arrowheads.
-   - **Rectangle / Box** (`R` key).
-   - **Ellipse / Circle** (`O` key).
-   - Hold `Shift` during drawing to snap lines or constrain shapes.
+   - **Freehand** (`F` key)
+   - **Straight Line** (`L` key)
+   - **Arrow** (`A` key) with automatically oriented sharp arrowheads
+   - **Rectangle / Box** (`R` key)
+   - **Ellipse / Circle** (`O` key)
+   - **Triangle** (`T` key)
+   - Hold **`Shift`** while drawing to snap lines to 45° increments or constrain rectangles and ellipses to perfect squares and circles.
+   - Floating **Shapes Flyout Modal** for visual selection.
 
-4. **Right-Click Eraser & Radial Menu**:
+4. **Custom Color & Opacity Studio**:
+   - Click the **`+`** slot in the toolbar to open the full-fledged **Color Studio**.
+   - Interactive 2D Saturation-Value picker and continuous 360° Hue spectrum slider.
+   - Live **Opacity / Alpha** slider (5% to 100%).
+   - One-click **Eyedropper** tool to sample any pixel color directly from your desktop.
+   - Hex code display with **Copy to Clipboard** button.
+   - Stores and displays your **Last 5 Recent Colors** palette across sessions.
+
+5. **Circular Radial Quick Menu**:
+   - **Quick Right-Click Tap**: Opens a sleek circular radial menu centered at your cursor with an orbital color ring, quick tools, and smooth sector hover animations.
+   - **Layer 2 Satellite Fan**: Hover over the top Recent Colors hub to smoothly fan out your latest 5 custom colors in an orbital satellite arc.
    - **Hold & Move Right Mouse Button**: Instant stroke-level eraser with circular radius indicator.
-   - **Quick Right-Click Tap**: Opens a floating **Circular Radial Menu** with a 360-degree color wheel and quick tools.
 
-5. **Pan & Zoom Canvas Navigation**:
-   - **Pan Mode** (`P` key): Drags and offsets all annotations across the screen.
-   - **Canvas Zoom**: While holding the canvas or in Pan mode, scroll the mouse wheel to dynamically zoom in and out centered on the cursor (15% - 800%).
-   - **Reset View**: Press `0` or `Ctrl + 0` to instantly reset zoom (100%) and pan offset (0, 0).
+6. **Collapsible Floating Toolbar & Status Pill**:
+   - Windows 11 Fluent dark acrylic styling with specular highlights and subtle group dividers.
+   - Drag the toolbar anywhere on your multi-monitor desktop.
+   - **Minimize Button (`B` key)**: Collapses the full bar into an ultra-compact status pill showing active ink color and grip handle.
+   - Click the pill in-place to expand it, or drag the pill to park it anywhere on screen.
 
-6. **Pointer / Click-Through Mode**:
-   - **Pointer Mode** (`M` key): Allows clicking through directly to desktop apps/games while keeping drawings visible.
+7. **Vanishing Neon Laser Pointer (`D` key)**:
+   - High-visibility neon glowing laser pointer bead with multi-tier glow aura.
+   - Temporary fading laser trails that dissolve smoothly after a configurable duration (200ms to 5000ms).
+   - Scroll wheel while in Laser mode instantly adjusts trail persistence.
 
-7. **Ink Visibility Toggle**:
-   - **Eye Toggle** (`V` key): Hides or restores all ink without clearing strokes.
+8. **Interactive Grid System (`G` key)**:
+   - Dot Grid, Squared Graph Grid, Engineering Grid, and Isometric 3D Triangle Grid overlays.
+   - Flyout modal allows switching styles and toggling density between Low, Medium, and High.
 
-8. **History Stack**:
-   - **Undo** (`Ctrl + Z`).
-   - **Redo** (`Ctrl + Y`).
-   - **Clear All** (`C` key) with undo capability.
+9. **Region Snipping & Full Screenshots**:
+   - **Full Snapshot** (`S` or `Ctrl + S`): Captures the annotated screen to the Windows clipboard (`CF_BITMAP`) and auto-saves to `%USERPROFILE%\Pictures\WinDraw\`.
+   - **Region Snip** (`Ctrl + Shift + S`): Click and drag a selection rectangle to crop and copy/save a specific screen region.
 
-9. **Draggable Windows 11 Fluent Toolbar**:
-   - 5px rounded corners, specular top rim, and subtle group dividers.
-   - Drag the toolbar by its handle or background to reposition anywhere.
-   - Quick pen swatches, tool toggles, shape selectors, and action buttons.
+10. **Pan & Zoom Canvas Navigation**:
+    - **Pan Mode** (`P` key): Click and drag to reposition drawings across large canvases.
+    - **Canvas Zoom**: While holding Pan or using the mouse wheel, smoothly zoom in and out (15% to 800%) centered on the cursor.
+    - **Reset View**: Press `0` or `Ctrl + 0` to reset zoom to 100% and pan offset to (0, 0).
 
-10. **Snapshot & Clipboard**:
-    - **Snapshot** (`S` or `Ctrl + S`): Copies annotated desktop directly to Windows clipboard (`CF_BITMAP`) and saves to `%USERPROFILE%\Pictures\WinDraw\`.
-    - Floating toast badge confirms capture.
+11. **Pointer / Click-Through Mode (`M` key)**:
+    - Allows interacting with underlying Windows applications and games while keeping your drawings overlaid.
+
+12. **Ink History & Visibility**:
+    - **Undo** (`Ctrl + Z`) and **Redo** (`Ctrl + Y`).
+    - **Clear All** (`C` key) with full undo support.
+    - **Hide/Show Ink** (`V` key): Temporarily toggles drawing visibility without clearing strokes.
+
+---
+
+### Keyboard Shortcuts Reference:
+
+| Shortcut | Action |
+|---|---|
+| **Ctrl + Alt + G** | Activate / Open WinDraw Overlay (Customizable) |
+| **ESC** | Dismiss / Close WinDraw Overlay |
+| **F** | Freehand Pen Tool |
+| **H** | Highlighter Tool |
+| **D** | Vanishing Neon Laser Pointer |
+| **E** | Eraser Tool (or hold Right Mouse Button) |
+| **L** | Straight Line Shape |
+| **A** | Arrow Shape |
+| **R** | Rectangle Shape |
+| **O** | Ellipse / Circle Shape |
+| **T** | Triangle Shape |
+| **P** | Pan Canvas Mode |
+| **M** | Pointer (Click-Through) Mode |
+| **G** | Toggle Grid Overlay Flyout |
+| **B** | Collapse / Expand Toolbar Pill |
+| **V** | Toggle Ink Visibility (Show/Hide) |
+| **C** | Clear All Drawings |
+| **Ctrl + Z** | Undo last stroke |
+| **Ctrl + Y** | Redo last undone stroke |
+| **S** / **Ctrl + S** | Take Full Screen Snapshot & Copy to Clipboard |
+| **Ctrl + Shift + S** | Region Snipping Tool |
+| **[** / **]** | Decrease / Increase Brush Size (or Laser Trail) |
+| **0** / **Ctrl + 0** | Reset Canvas Zoom & Pan |
+| **1 - 4** | Select Preset Colors (Red, Blue, Green, Yellow) |
+| **5** | Open Custom Color & Opacity Studio |
 */
 // ==/WindhawkModReadme==
 
@@ -688,6 +741,7 @@ inline void PushRecentColor(D2D1_COLOR_F c) {
     }
     g_recentColors.insert(g_recentColors.begin(), c);
     if (g_recentColors.size() > 5) g_recentColors.resize(5);
+    SavePersistentRecentColors();
 }
 
 inline std::wstring ColorToHex(D2D1_COLOR_F c, bool includeAlpha = false) {
@@ -702,6 +756,91 @@ inline std::wstring ColorToHex(D2D1_COLOR_F c, bool includeAlpha = false) {
         wsprintfW(buf, L"#%02X%02X%02X", r, g, b);
     }
     return std::wstring(buf);
+}
+
+// ----------------------------------------------------------------------------
+// Windhawk Local Storage Persistence (Wh_Set*Value / Wh_Get*Value)
+// ----------------------------------------------------------------------------
+
+inline void SavePersistentRecentColors() {
+    std::wstring str;
+    for (size_t i = 0; i < g_recentColors.size(); ++i) {
+        int r = (int)std::round(std::max(0.0f, std::min(1.0f, g_recentColors[i].r)) * 255.0f);
+        int g = (int)std::round(std::max(0.0f, std::min(1.0f, g_recentColors[i].g)) * 255.0f);
+        int b = (int)std::round(std::max(0.0f, std::min(1.0f, g_recentColors[i].b)) * 255.0f);
+        WCHAR buf[16];
+        wsprintfW(buf, L"#%02X%02X%02X", r, g, b);
+        if (i > 0) str += L",";
+        str += buf;
+    }
+    Wh_SetStringValue(L"recentColors", str.c_str());
+}
+
+inline void SavePersistentCustomColor() {
+    WCHAR buf[128];
+    int h100 = (int)std::round(g_customColor.hue * 100.0f);
+    int s100 = (int)std::round(g_customColor.sat * 100.0f);
+    int v100 = (int)std::round(g_customColor.val * 100.0f);
+    int a100 = (int)std::round(g_customColor.alpha * 100.0f);
+    wsprintfW(buf, L"%d,%d,%d,%d", h100, s100, v100, a100);
+    Wh_SetStringValue(L"customColor", buf);
+}
+
+inline void SavePersistentToolbarState() {
+    Wh_SetIntValue(L"toolbarCollapsed", g_toolbarCollapsed ? 1 : 0);
+    if (g_toolbarCustomX >= 0.0f && g_toolbarCustomY >= 0.0f) {
+        Wh_SetIntValue(L"toolbarCustomX", (int)std::round(g_toolbarCustomX));
+        Wh_SetIntValue(L"toolbarCustomY", (int)std::round(g_toolbarCustomY));
+    }
+}
+
+inline void LoadPersistentState() {
+    // 1. Load Last 5 Recent Colors
+    WCHAR recentBuf[256] = { 0 };
+    if (Wh_GetStringValue(L"recentColors", recentBuf, 256) > 0) {
+        std::vector<D2D1_COLOR_F> loaded;
+        std::wstringstream ss(recentBuf);
+        std::wstring item;
+        while (std::getline(ss, item, L',')) {
+            if (item.length() >= 7 && item[0] == L'#') {
+                try {
+                    unsigned long hex = std::stoul(item.substr(1), nullptr, 16);
+                    float r = ((hex >> 16) & 0xFF) / 255.0f;
+                    float g = ((hex >> 8) & 0xFF) / 255.0f;
+                    float b = (hex & 0xFF) / 255.0f;
+                    loaded.push_back(D2D1::ColorF(r, g, b, 1.0f));
+                } catch (...) {}
+            }
+        }
+        if (loaded.size() == 5) {
+            g_recentColors = loaded;
+        }
+    }
+
+    // 2. Load Custom Color State
+    WCHAR customBuf[128] = { 0 };
+    if (Wh_GetStringValue(L"customColor", customBuf, 128) > 0) {
+        int h100 = 0, s100 = 0, v100 = 0, a100 = 0;
+        if (swscanf_s(customBuf, L"%d,%d,%d,%d", &h100, &s100, &v100, &a100) == 4) {
+            g_customColor.hue = std::max(0.0f, std::min(360.0f, (float)h100 / 100.0f));
+            g_customColor.sat = std::max(0.0f, std::min(1.0f, (float)s100 / 100.0f));
+            g_customColor.val = std::max(0.0f, std::min(1.0f, (float)v100 / 100.0f));
+            g_customColor.alpha = std::max(0.05f, std::min(1.0f, (float)a100 / 100.0f));
+            g_customColor.activeColor = HSVtoRGB(g_customColor.hue, g_customColor.sat, g_customColor.val, g_customColor.alpha);
+        }
+    }
+
+    // 3. Load Toolbar Collapsed & Position
+    int collapsed = Wh_GetIntValue(L"toolbarCollapsed", -1);
+    if (collapsed != -1) {
+        g_toolbarCollapsed = (collapsed != 0);
+    }
+    int customX = Wh_GetIntValue(L"toolbarCustomX", -99999);
+    int customY = Wh_GetIntValue(L"toolbarCustomY", -99999);
+    if (customX != -99999 && customY != -99999) {
+        g_toolbarCustomX = (float)customX;
+        g_toolbarCustomY = (float)customY;
+    }
 }
 
 // Toast feedback
@@ -4463,6 +4602,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 ShowToastNotification(L"Toolbar Collapsed");
             }
             BuildToolbarLayout(vw, vh);
+            SavePersistentToolbarState();
             InvalidateOverlay();
             return 0;
         }
@@ -4958,6 +5098,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 RGBtoHSV(g_customColor.activeColor, g_customColor.hue, g_customColor.sat, g_customColor.val);
                 g_activeColor = g_customColor.activeColor;
                 PushRecentColor(g_activeColor);
+                SavePersistentCustomColor();
             }
             g_isEyedropperActive = false;
             ShowToastNotification(L"Color Sampled!");
@@ -5513,6 +5654,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         g_toolbarCustomX = oldCenterX - 41.0f; // pillW * 0.5f
                     }
                     BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+                    SavePersistentToolbarState();
                     InvalidateOverlay();
                     return 0;
                 case 99: // Exit
@@ -5587,6 +5729,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ReleaseCapture();
             g_pickerDrag = ColorPickerDrag::None;
             PushRecentColor(g_customColor.activeColor);
+            SavePersistentCustomColor();
             BuildToolbarLayout(GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
             InvalidateOverlay();
             return 0;
@@ -5650,8 +5793,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (g_toolbarCustomX < 10.0f) g_toolbarCustomX = 10.0f;
                 if (g_toolbarCustomX + 850.0f > (float)vw - 10.0f) g_toolbarCustomX = (float)vw - 850.0f - 10.0f;
                 BuildToolbarLayout(vw, vh);
+                SavePersistentToolbarState();
                 ShowToastNotification(L"Toolbar Expanded");
                 InvalidateOverlay();
+            } else {
+                SavePersistentToolbarState();
             }
             return 0;
         }
@@ -5659,6 +5805,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_isDraggingToolbar) {
             ReleaseCapture();
             g_isDraggingToolbar = false;
+            SavePersistentToolbarState();
             return 0;
         }
 
@@ -6281,6 +6428,7 @@ BOOL Wh_ModInit() {
     Wh_Log(L"WinDraw: Initializing");
 
     LoadSettings();
+    LoadPersistentState();
     g_currentPenWidth = (g_currentTool == ToolMode::Highlighter) ? g_settings.defaultHighlighterWidth : g_settings.defaultPenWidth;
 
     CoInitialize(NULL);

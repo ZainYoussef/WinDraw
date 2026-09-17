@@ -193,6 +193,123 @@ struct Stroke {
     ShapeType shapeType;
     StrokePoint startPt;
     StrokePoint endPt;
+    ID2D1PathGeometry* pCachedGeometry;
+    D2D1_RECT_F bounds;
+
+    Stroke()
+        : color(D2D1::ColorF(0, 0, 0, 1.0f)),
+          width(3.5f),
+          isHighlighter(false),
+          shapeType(ShapeType::Freehand),
+          startPt{ 0.0f, 0.0f },
+          endPt{ 0.0f, 0.0f },
+          pCachedGeometry(nullptr),
+          bounds{ 0.0f, 0.0f, 0.0f, 0.0f }
+    {}
+
+    Stroke(const Stroke& other) {
+        CopyFrom(other);
+    }
+
+    Stroke(Stroke&& other) noexcept {
+        MoveFrom(std::move(other));
+    }
+
+    Stroke& operator=(const Stroke& other) {
+        if (this != &other) {
+            ReleaseGeometry();
+            CopyFrom(other);
+        }
+        return *this;
+    }
+
+    Stroke& operator=(Stroke&& other) noexcept {
+        if (this != &other) {
+            ReleaseGeometry();
+            MoveFrom(std::move(other));
+        }
+        return *this;
+    }
+
+    ~Stroke() {
+        ReleaseGeometry();
+    }
+
+    void ReleaseGeometry() {
+        if (pCachedGeometry) {
+            pCachedGeometry->Release();
+            pCachedGeometry = nullptr;
+        }
+    }
+
+    void InvalidateCache() {
+        ReleaseGeometry();
+        ComputeBounds();
+    }
+
+    void ComputeBounds() {
+        if (shapeType == ShapeType::Freehand) {
+            if (points.empty()) {
+                bounds = D2D1::RectF(0, 0, 0, 0);
+                return;
+            }
+            float minX = points[0].x, maxX = points[0].x;
+            float minY = points[0].y, maxY = points[0].y;
+            for (const auto& pt : points) {
+                if (pt.x < minX) minX = pt.x;
+                if (pt.x > maxX) maxX = pt.x;
+                if (pt.y < minY) minY = pt.y;
+                if (pt.y > maxY) maxY = pt.y;
+            }
+            float pad = width * 0.5f + 4.0f;
+            bounds = D2D1::RectF(minX - pad, minY - pad, maxX + pad, maxY + pad);
+        }
+        else if (shapeType == ShapeType::Line || shapeType == ShapeType::Arrow) {
+            float minX = std::min(startPt.x, endPt.x);
+            float maxX = std::max(startPt.x, endPt.x);
+            float minY = std::min(startPt.y, endPt.y);
+            float maxY = std::max(startPt.y, endPt.y);
+            float pad = std::max(width * 0.5f, 18.0f) + 4.0f;
+            bounds = D2D1::RectF(minX - pad, minY - pad, maxX + pad, maxY + pad);
+        }
+        else if (shapeType == ShapeType::Rectangle || shapeType == ShapeType::Ellipse) {
+            float minX = std::min(startPt.x, endPt.x);
+            float maxX = std::max(startPt.x, endPt.x);
+            float minY = std::min(startPt.y, endPt.y);
+            float maxY = std::max(startPt.y, endPt.y);
+            float pad = width * 0.5f + 4.0f;
+            bounds = D2D1::RectF(minX - pad, minY - pad, maxX + pad, maxY + pad);
+        }
+    }
+
+private:
+    void CopyFrom(const Stroke& other) {
+        points = other.points;
+        color = other.color;
+        width = other.width;
+        isHighlighter = other.isHighlighter;
+        shapeType = other.shapeType;
+        startPt = other.startPt;
+        endPt = other.endPt;
+        bounds = other.bounds;
+        pCachedGeometry = other.pCachedGeometry;
+        if (pCachedGeometry) {
+            pCachedGeometry->AddRef();
+        }
+    }
+
+    void MoveFrom(Stroke&& other) noexcept {
+        points = std::move(other.points);
+        color = other.color;
+        width = other.width;
+        isHighlighter = other.isHighlighter;
+        shapeType = other.shapeType;
+        startPt = other.startPt;
+        endPt = other.endPt;
+        bounds = other.bounds;
+        pCachedGeometry = other.pCachedGeometry;
+        other.pCachedGeometry = nullptr;
+    }
 };
 
 // ----------------------------------------------------------------------------
@@ -226,6 +343,7 @@ static const size_t kPresetColorCount = sizeof(kPresetColors) / sizeof(kPresetCo
 
 static HWND g_hOverlayWnd = NULL;
 static HWND g_hHotkeyWnd = NULL;
+static HANDLE g_hHotkeyThread = NULL;
 static bool g_bIsActive = false;
 
 static ID2D1Factory* g_pD2DFactory = NULL;
@@ -240,7 +358,17 @@ static IDWriteTextFormat* g_pCenterBadgeFormat = NULL;
 static IWICImagingFactory* g_pWICFactory = NULL;
 
 static std::vector<Stroke> g_strokes;
-static std::vector<Stroke> g_redoStack;
+static std::vector<std::vector<Stroke>> g_undoStack;
+static std::vector<std::vector<Stroke>> g_redoStack;
+static const size_t kMaxUndoLevels = 30;
+
+void PushUndoState() {
+    g_undoStack.push_back(g_strokes);
+    if (g_undoStack.size() > kMaxUndoLevels) {
+        g_undoStack.erase(g_undoStack.begin());
+    }
+    g_redoStack.clear();
+}
 static Stroke g_currentStroke;
 static bool g_isDrawing = false;
 
@@ -398,32 +526,63 @@ void CaptureDesktop() {
     int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (vw <= 0 || vh <= 0) return;
+
+    UINT32 maxTexSize = g_pRenderTarget->GetMaximumBitmapSize();
+    int capW = vw;
+    int capH = vh;
+    if (maxTexSize > 0) {
+        if (capW > (int)maxTexSize) {
+            capH = std::max(1, (int)((float)capH * ((float)maxTexSize / (float)capW)));
+            capW = (int)maxTexSize;
+        }
+        if (capH > (int)maxTexSize) {
+            capW = std::max(1, (int)((float)capW * ((float)maxTexSize / (float)capH)));
+            capH = (int)maxTexSize;
+        }
+    }
 
     HDC hScreenDC = GetDC(NULL);
+    if (!hScreenDC) return;
     HDC hMemDC = CreateCompatibleDC(hScreenDC);
+    if (!hMemDC) {
+        ReleaseDC(NULL, hScreenDC);
+        return;
+    }
 
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = vw;
-    bmi.bmiHeader.biHeight = -vh; // top-down
+    bmi.bmiHeader.biWidth = capW;
+    bmi.bmiHeader.biHeight = -capH; // top-down
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     void* pBits = nullptr;
     HBITMAP hBitmap = CreateDIBSection(hMemDC, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (!hBitmap) {
+        DeleteDC(hMemDC);
+        ReleaseDC(NULL, hScreenDC);
+        return;
+    }
+
     HBITMAP hOldBitmap = (HBITMAP)SelectObject(hMemDC, hBitmap);
 
-    BitBlt(hMemDC, 0, 0, vw, vh, hScreenDC, vx, vy, SRCCOPY | CAPTUREBLT);
+    if (capW == vw && capH == vh) {
+        BitBlt(hMemDC, 0, 0, vw, vh, hScreenDC, vx, vy, SRCCOPY | CAPTUREBLT);
+    } else {
+        SetStretchBltMode(hMemDC, HALFTONE);
+        StretchBlt(hMemDC, 0, 0, capW, capH, hScreenDC, vx, vy, vw, vh, SRCCOPY | CAPTUREBLT);
+    }
 
     D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)
     );
 
     g_pRenderTarget->CreateBitmap(
-        D2D1::SizeU(vw, vh),
+        D2D1::SizeU(capW, capH),
         pBits,
-        vw * 4,
+        capW * 4,
         props,
         &g_pDesktopBitmap
     );
@@ -455,6 +614,7 @@ HRESULT CreateD2DResources(HWND hwnd) {
     );
 
     if (SUCCEEDED(hr)) {
+        g_pRenderTarget->SetDpi(96.0f, 96.0f);
         g_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         MARGINS margins = { -1, -1, -1, -1 };
@@ -703,7 +863,51 @@ void DrawArrowhead(ID2D1HwndRenderTarget* pRT, ID2D1SolidColorBrush* pBrush, flo
     }
 }
 
-void DrawSmoothStroke(ID2D1HwndRenderTarget* pRT, const Stroke& stroke) {
+void BuildStrokeGeometry(Stroke& stroke) {
+    if (stroke.pCachedGeometry) return;
+    if (stroke.shapeType != ShapeType::Freehand || stroke.points.size() <= 1) return;
+    if (!g_pD2DFactory) return;
+
+    ID2D1PathGeometry* pGeometry = nullptr;
+    if (SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pGeometry))) {
+        ID2D1GeometrySink* pSink = nullptr;
+        if (SUCCEEDED(pGeometry->Open(&pSink))) {
+            pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
+            pSink->BeginFigure(
+                D2D1::Point2F(stroke.points[0].x, stroke.points[0].y),
+                D2D1_FIGURE_BEGIN_HOLLOW
+            );
+
+            if (stroke.points.size() == 2) {
+                pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
+            }
+            else {
+                for (size_t i = 1; i < stroke.points.size() - 1; ++i) {
+                    D2D1_POINT_2F midPoint = D2D1::Point2F(
+                        (stroke.points[i].x + stroke.points[i + 1].x) * 0.5f,
+                        (stroke.points[i].y + stroke.points[i + 1].y) * 0.5f
+                    );
+                    pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                        D2D1::Point2F(stroke.points[i].x, stroke.points[i].y),
+                        midPoint
+                    ));
+                }
+                pSink->AddLine(D2D1::Point2F(stroke.points.back().x, stroke.points.back().y));
+            }
+
+            pSink->EndFigure(D2D1_FIGURE_END_OPEN);
+            pSink->Close();
+            pSink->Release();
+
+            stroke.pCachedGeometry = pGeometry;
+        }
+        else {
+            pGeometry->Release();
+        }
+    }
+}
+
+void DrawSmoothStroke(ID2D1HwndRenderTarget* pRT, Stroke& stroke) {
     if (!g_inkVisible) return;
 
     ID2D1SolidColorBrush* pBrush = nullptr;
@@ -755,41 +959,54 @@ void DrawSmoothStroke(ID2D1HwndRenderTarget* pRT, const Stroke& stroke) {
             pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y), r, r), pBrush);
         }
         else {
-            ID2D1PathGeometry* pGeometry = nullptr;
-            g_pD2DFactory->CreatePathGeometry(&pGeometry);
-            if (pGeometry) {
-                ID2D1GeometrySink* pSink = nullptr;
-                if (SUCCEEDED(pGeometry->Open(&pSink))) {
-                    pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
-                    pSink->BeginFigure(
-                        D2D1::Point2F(stroke.points[0].x, stroke.points[0].y),
-                        D2D1_FIGURE_BEGIN_HOLLOW
-                    );
-
-                    if (stroke.points.size() == 2) {
-                        pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
+            if (stroke.pCachedGeometry) {
+                pRT->DrawGeometry(stroke.pCachedGeometry, pBrush, stroke.width, g_pRoundStrokeStyle);
+            }
+            else {
+                if (&stroke != &g_currentStroke) {
+                    BuildStrokeGeometry(stroke);
+                    if (stroke.pCachedGeometry) {
+                        pRT->DrawGeometry(stroke.pCachedGeometry, pBrush, stroke.width, g_pRoundStrokeStyle);
                     }
-                    else {
-                        for (size_t i = 1; i < stroke.points.size() - 1; ++i) {
-                            D2D1_POINT_2F midPoint = D2D1::Point2F(
-                                (stroke.points[i].x + stroke.points[i + 1].x) * 0.5f,
-                                (stroke.points[i].y + stroke.points[i + 1].y) * 0.5f
-                            );
-                            pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
-                                D2D1::Point2F(stroke.points[i].x, stroke.points[i].y),
-                                midPoint
-                            ));
-                        }
-                        pSink->AddLine(D2D1::Point2F(stroke.points.back().x, stroke.points.back().y));
-                    }
-
-                    pSink->EndFigure(D2D1_FIGURE_END_OPEN);
-                    pSink->Close();
-                    pSink->Release();
-
-                    pRT->DrawGeometry(pGeometry, pBrush, stroke.width, g_pRoundStrokeStyle);
                 }
-                pGeometry->Release();
+                else {
+                    // Active in-progress stroke being actively drawn:
+                    ID2D1PathGeometry* pGeometry = nullptr;
+                    if (g_pD2DFactory && SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pGeometry))) {
+                        ID2D1GeometrySink* pSink = nullptr;
+                        if (SUCCEEDED(pGeometry->Open(&pSink))) {
+                            pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
+                            pSink->BeginFigure(
+                                D2D1::Point2F(stroke.points[0].x, stroke.points[0].y),
+                                D2D1_FIGURE_BEGIN_HOLLOW
+                            );
+
+                            if (stroke.points.size() == 2) {
+                                pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
+                            }
+                            else {
+                                for (size_t i = 1; i < stroke.points.size() - 1; ++i) {
+                                    D2D1_POINT_2F midPoint = D2D1::Point2F(
+                                        (stroke.points[i].x + stroke.points[i + 1].x) * 0.5f,
+                                        (stroke.points[i].y + stroke.points[i + 1].y) * 0.5f
+                                    );
+                                    pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                                        D2D1::Point2F(stroke.points[i].x, stroke.points[i].y),
+                                        midPoint
+                                    ));
+                                }
+                                pSink->AddLine(D2D1::Point2F(stroke.points.back().x, stroke.points.back().y));
+                            }
+
+                            pSink->EndFigure(D2D1_FIGURE_END_OPEN);
+                            pSink->Close();
+                            pSink->Release();
+
+                            pRT->DrawGeometry(pGeometry, pBrush, stroke.width, g_pRoundStrokeStyle);
+                        }
+                        pGeometry->Release();
+                    }
+                }
             }
         }
     }
@@ -1239,7 +1456,7 @@ void RenderOverlay() {
     g_pRenderTarget->SetTransform(canvasMatrix);
 
     // 2. Draw completed strokes
-    for (const auto& stroke : g_strokes) {
+    for (auto& stroke : g_strokes) {
         DrawSmoothStroke(g_pRenderTarget, stroke);
     }
 
@@ -1266,7 +1483,14 @@ void RenderOverlay() {
     D2D1_SIZE_F s = g_pRenderTarget->GetSize();
     DrawToast(g_pRenderTarget, (int)s.width, (int)s.height);
 
-    g_pRenderTarget->EndDraw();
+    HRESULT hr = g_pRenderTarget->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) {
+        ReleaseD2DResources();
+        if (g_hOverlayWnd) {
+            CreateD2DResources(g_hOverlayWnd);
+            InvalidateOverlay();
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1280,10 +1504,22 @@ void EraseBrushAt(float x, float y, float radius) {
     float adjustedX = (x - g_panOffsetX) / g_zoomScale;
     float adjustedY = (y - g_panOffsetY) / g_zoomScale;
 
+    float eraserMinX = adjustedX - adjustedRadius;
+    float eraserMaxX = adjustedX + adjustedRadius;
+    float eraserMinY = adjustedY - adjustedRadius;
+    float eraserMaxY = adjustedY + adjustedRadius;
+
     std::vector<Stroke> resultingStrokes;
     resultingStrokes.reserve(g_strokes.size() + 8);
 
     for (auto& stroke : g_strokes) {
+        // Fast-fail AABB check
+        if (eraserMaxX < stroke.bounds.left || eraserMinX > stroke.bounds.right ||
+            eraserMaxY < stroke.bounds.top  || eraserMinY > stroke.bounds.bottom) {
+            resultingStrokes.push_back(stroke);
+            continue;
+        }
+
         if (stroke.shapeType == ShapeType::Freehand) {
             bool touches = false;
             for (size_t i = 0; i < stroke.points.size(); ++i) {
@@ -1330,6 +1566,8 @@ void EraseBrushAt(float x, float y, float radius) {
                     if (!curSeg.empty()) {
                         Stroke subStroke = stroke;
                         subStroke.points = curSeg;
+                        subStroke.InvalidateCache();
+                        BuildStrokeGeometry(subStroke);
                         resultingStrokes.push_back(subStroke);
                         curSeg.clear();
                     }
@@ -1341,6 +1579,8 @@ void EraseBrushAt(float x, float y, float radius) {
             if (!curSeg.empty()) {
                 Stroke subStroke = stroke;
                 subStroke.points = curSeg;
+                subStroke.InvalidateCache();
+                BuildStrokeGeometry(subStroke);
                 resultingStrokes.push_back(subStroke);
             }
         }
@@ -1368,6 +1608,8 @@ void EraseBrushAt(float x, float y, float radius) {
                         Stroke subStroke = stroke;
                         subStroke.shapeType = ShapeType::Freehand;
                         subStroke.points = curSeg;
+                        subStroke.InvalidateCache();
+                        BuildStrokeGeometry(subStroke);
                         resultingStrokes.push_back(subStroke);
                         curSeg.clear();
                     }
@@ -1380,6 +1622,8 @@ void EraseBrushAt(float x, float y, float radius) {
                 Stroke subStroke = stroke;
                 subStroke.shapeType = ShapeType::Freehand;
                 subStroke.points = curSeg;
+                subStroke.InvalidateCache();
+                BuildStrokeGeometry(subStroke);
                 resultingStrokes.push_back(subStroke);
             }
         }
@@ -1414,6 +1658,8 @@ void EraseBrushAt(float x, float y, float radius) {
                         Stroke subStroke = stroke;
                         subStroke.shapeType = ShapeType::Freehand;
                         subStroke.points = curSeg;
+                        subStroke.InvalidateCache();
+                        BuildStrokeGeometry(subStroke);
                         resultingStrokes.push_back(subStroke);
                         curSeg.clear();
                     }
@@ -1426,6 +1672,8 @@ void EraseBrushAt(float x, float y, float radius) {
                 Stroke subStroke = stroke;
                 subStroke.shapeType = ShapeType::Freehand;
                 subStroke.points = curSeg;
+                subStroke.InvalidateCache();
+                BuildStrokeGeometry(subStroke);
                 resultingStrokes.push_back(subStroke);
             }
         }
@@ -1463,6 +1711,8 @@ void EraseBrushAt(float x, float y, float radius) {
                         Stroke subStroke = stroke;
                         subStroke.shapeType = ShapeType::Freehand;
                         subStroke.points = curSeg;
+                        subStroke.InvalidateCache();
+                        BuildStrokeGeometry(subStroke);
                         resultingStrokes.push_back(subStroke);
                         curSeg.clear();
                     }
@@ -1475,6 +1725,8 @@ void EraseBrushAt(float x, float y, float radius) {
                 Stroke subStroke = stroke;
                 subStroke.shapeType = ShapeType::Freehand;
                 subStroke.points = curSeg;
+                subStroke.InvalidateCache();
+                BuildStrokeGeometry(subStroke);
                 resultingStrokes.push_back(subStroke);
             }
         }
@@ -1493,7 +1745,19 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
     float adjustedX = (x - g_panOffsetX) / g_zoomScale;
     float adjustedY = (y - g_panOffsetY) / g_zoomScale;
 
+    float eraserMinX = adjustedX - adjustedRadius;
+    float eraserMaxX = adjustedX + adjustedRadius;
+    float eraserMinY = adjustedY - adjustedRadius;
+    float eraserMaxY = adjustedY + adjustedRadius;
+
     for (auto it = g_strokes.begin(); it != g_strokes.end();) {
+        // Fast-fail AABB check
+        if (eraserMaxX < it->bounds.left || eraserMinX > it->bounds.right ||
+            eraserMaxY < it->bounds.top  || eraserMinY > it->bounds.bottom) {
+            ++it;
+            continue;
+        }
+
         bool hit = false;
         if (it->shapeType == ShapeType::Freehand) {
             const auto& pts = it->points;
@@ -1542,7 +1806,6 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
         }
 
         if (hit) {
-            g_redoStack.push_back(*it);
             it = g_strokes.erase(it);
             changed = true;
         }
@@ -1612,22 +1875,29 @@ void CopySnapshotToClipboard() {
     int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (vw <= 0 || vh <= 0) return;
 
     HDC hScreenDC = GetDC(NULL);
+    if (!hScreenDC) return;
     HDC hMemDC = CreateCompatibleDC(hScreenDC);
-    HBITMAP hBitmap = CreateCompatibleBitmap(hScreenDC, vw, vh);
-    HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, hBitmap);
-
-    BitBlt(hMemDC, 0, 0, vw, vh, hScreenDC, vx, vy, SRCCOPY | CAPTUREBLT);
-
-    // Save to Clipboard
-    if (OpenClipboard(g_hOverlayWnd)) {
-        EmptyClipboard();
-        SetClipboardData(CF_BITMAP, hBitmap);
-        CloseClipboard();
+    if (!hMemDC) {
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
-    // Auto-save PNG if enabled
+    HBITMAP hBitmap = CreateCompatibleBitmap(hScreenDC, vw, vh);
+    if (!hBitmap) {
+        DeleteDC(hMemDC);
+        ReleaseDC(NULL, hScreenDC);
+        return;
+    }
+
+    HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, hBitmap);
+    BitBlt(hMemDC, 0, 0, vw, vh, hScreenDC, vx, vy, SRCCOPY | CAPTUREBLT);
+    SelectObject(hMemDC, hOldBmp);
+
+    // Auto-save PNG if enabled (do this BEFORE passing ownership to clipboard)
+    bool savedToFile = false;
     if (g_settings.autoSaveSnapshot) {
         wchar_t picturesPath[MAX_PATH];
         if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
@@ -1642,16 +1912,58 @@ void CopySnapshotToClipboard() {
 
             std::wstring fullPath = winDrawDir + filename;
             SaveBitmapToPNG(hBitmap, fullPath);
-            g_toastMessage = L"Saved to Pictures/WinDraw & Clipboard";
+            savedToFile = true;
         }
     }
-    else {
-        g_toastMessage = L"Copied to Clipboard";
+
+    // Save to Clipboard with both CF_BITMAP and CF_DIB
+    bool clipboardSucceeded = false;
+    if (OpenClipboard(g_hOverlayWnd)) {
+        if (EmptyClipboard()) {
+            BITMAPINFO bmi = {};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = vw;
+            bmi.bmiHeader.biHeight = vh;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            DWORD dibSize = sizeof(BITMAPINFOHEADER) + vw * vh * 4;
+            HGLOBAL hDIB = GlobalAlloc(GHND, dibSize);
+            if (hDIB) {
+                BYTE* pDIB = (BYTE*)GlobalLock(hDIB);
+                if (pDIB) {
+                    memcpy(pDIB, &bmi.bmiHeader, sizeof(BITMAPINFOHEADER));
+                    GetDIBits(hMemDC, hBitmap, 0, vh, pDIB + sizeof(BITMAPINFOHEADER), &bmi, DIB_RGB_COLORS);
+                    GlobalUnlock(hDIB);
+                    SetClipboardData(CF_DIB, hDIB);
+                } else {
+                    GlobalFree(hDIB);
+                }
+            }
+
+            if (SetClipboardData(CF_BITMAP, hBitmap)) {
+                clipboardSucceeded = true;
+            }
+        }
+        CloseClipboard();
     }
 
-    SelectObject(hMemDC, hOldBmp);
+    if (!clipboardSucceeded) {
+        DeleteObject(hBitmap); // Prevent GDI leak on clipboard failure!
+    }
+
     DeleteDC(hMemDC);
     ReleaseDC(NULL, hScreenDC);
+
+    if (clipboardSucceeded && savedToFile) {
+        g_toastMessage = L"Saved to Pictures/WinDraw & Clipboard";
+    } else if (clipboardSucceeded) {
+        g_toastMessage = L"Copied to Clipboard";
+    } else if (savedToFile) {
+        g_toastMessage = L"Saved to Pictures/WinDraw";
+    } else {
+        g_toastMessage = L"Snapshot capture failed";
+    }
 
     g_toastStartTime = GetTickCount64();
     if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, 1, 30, NULL);
@@ -1666,10 +1978,9 @@ void SetToolMode(ToolMode newMode) {
     if (g_hOverlayWnd) {
         if (newMode == ToolMode::Pointer) {
             // Enter Pointer (Click-Through) mode:
-            // Apply WS_EX_LAYERED | WS_EX_TRANSPARENT so mouse clicks pass through to background apps
+            // Window is already layered, so only toggle WS_EX_TRANSPARENT to avoid black flashing
             LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
-            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT);
-            SetLayeredWindowAttributes(g_hOverlayWnd, 0, 255, LWA_ALPHA);
+            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
             SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             SetTimer(g_hOverlayWnd, 2, 20, NULL);
 
@@ -1681,7 +1992,7 @@ void SetToolMode(ToolMode newMode) {
             // Exit Pointer mode:
             KillTimer(g_hOverlayWnd, 2);
             LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
-            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT));
+            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
             SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
             g_toastMessage = L"Drawing Mode active";
@@ -1706,6 +2017,33 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         else {
             SetToolMode(ToolMode::Pointer);
+        }
+        return 0;
+    }
+
+    case WM_DISPLAYCHANGE: {
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh, SWP_NOZORDER | SWP_NOACTIVATE);
+        if (g_pRenderTarget) {
+            g_pRenderTarget->Resize(D2D1::SizeU(vw, vh));
+        }
+        CaptureDesktop();
+        BuildToolbarLayout(vw, vh);
+        InvalidateOverlay();
+        return 0;
+    }
+
+    case WM_SIZE: {
+        UINT width = LOWORD(lParam);
+        UINT height = HIWORD(lParam);
+        if (g_pRenderTarget && width > 0 && height > 0) {
+            g_pRenderTarget->Resize(D2D1::SizeU(width, height));
+            BuildToolbarLayout(width, height);
+            InvalidateOverlay();
         }
         return 0;
     }
@@ -1839,8 +2177,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             else {
                 KillTimer(hwnd, 2);
                 LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-                if (exStyle & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) {
-                    SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT));
+                if (exStyle & WS_EX_TRANSPARENT) {
+                    SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
                     SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
                 }
             }
@@ -1872,16 +2210,18 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (GetKeyState(VK_SHIFT) & 0x8000) {
                 // Redo (Ctrl+Shift+Z)
                 if (!g_redoStack.empty()) {
-                    g_strokes.push_back(g_redoStack.back());
+                    g_undoStack.push_back(std::move(g_strokes));
+                    g_strokes = std::move(g_redoStack.back());
                     g_redoStack.pop_back();
                     InvalidateOverlay();
                 }
             }
             else {
                 // Undo (Ctrl+Z)
-                if (!g_strokes.empty()) {
-                    g_redoStack.push_back(g_strokes.back());
-                    g_strokes.pop_back();
+                if (!g_undoStack.empty()) {
+                    g_redoStack.push_back(std::move(g_strokes));
+                    g_strokes = std::move(g_undoStack.back());
+                    g_undoStack.pop_back();
                     InvalidateOverlay();
                 }
             }
@@ -1890,13 +2230,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Y') {
             // Redo (Ctrl+Y)
             if (!g_redoStack.empty()) {
-                g_strokes.push_back(g_redoStack.back());
+                g_undoStack.push_back(std::move(g_strokes));
+                g_strokes = std::move(g_redoStack.back());
                 g_redoStack.pop_back();
                 InvalidateOverlay();
             }
             return 0;
         }
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S' || wParam == 'S') {
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S') {
             CopySnapshotToClipboard();
             return 0;
         }
@@ -1907,7 +2248,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (wParam == 'V') { g_inkVisible = !g_inkVisible; InvalidateOverlay(); return 0; }
         if (wParam == 'C') {
             if (!g_strokes.empty()) {
-                g_redoStack.insert(g_redoStack.end(), g_strokes.begin(), g_strokes.end());
+                PushUndoState();
                 g_strokes.clear();
                 InvalidateOverlay();
             }
@@ -2041,7 +2382,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_isRightMouseDown && g_currentTool != ToolMode::Eraser) {
             float distMoved = std::sqrt(DistanceSq(g_cursorX, g_cursorY, (float)g_rightMouseDownPos.x, (float)g_rightMouseDownPos.y));
             if (distMoved > 4.0f || (GetTickCount64() - g_rightMouseDownTime > 120)) {
-                g_isRightClickErasing = true;
+                if (!g_isRightClickErasing) {
+                    PushUndoState();
+                    g_isRightClickErasing = true;
+                }
             }
             if (g_isRightClickErasing) {
                 EraseBrushAt(g_cursorX, g_cursorY, g_eraserRadius);
@@ -2095,7 +2439,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             else if (g_radialHoverTarget == RadialTarget::Clear) {
                 if (!g_strokes.empty()) {
-                    g_redoStack.insert(g_redoStack.end(), g_strokes.begin(), g_strokes.end());
+                    PushUndoState();
                     g_strokes.clear();
                 }
             }
@@ -2106,9 +2450,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetToolMode(ToolMode::Eraser);
             }
             else if (g_radialHoverTarget == RadialTarget::Undo) {
-                if (!g_strokes.empty()) {
-                    g_redoStack.push_back(g_strokes.back());
-                    g_strokes.pop_back();
+                if (!g_undoStack.empty()) {
+                    g_redoStack.push_back(std::move(g_strokes));
+                    g_strokes = std::move(g_undoStack.back());
+                    g_undoStack.pop_back();
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Pointer) {
@@ -2193,20 +2538,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     CopySnapshotToClipboard();
                     break;
                 case 11: // Undo
-                    if (!g_strokes.empty()) {
-                        g_redoStack.push_back(g_strokes.back());
-                        g_strokes.pop_back();
+                    if (!g_undoStack.empty()) {
+                        g_redoStack.push_back(std::move(g_strokes));
+                        g_strokes = std::move(g_undoStack.back());
+                        g_undoStack.pop_back();
                     }
                     break;
                 case 12: // Redo
                     if (!g_redoStack.empty()) {
-                        g_strokes.push_back(g_redoStack.back());
+                        g_undoStack.push_back(std::move(g_strokes));
+                        g_strokes = std::move(g_redoStack.back());
                         g_redoStack.pop_back();
                     }
                     break;
                 case 13: // Clear
                     if (!g_strokes.empty()) {
-                        g_redoStack.insert(g_redoStack.end(), g_strokes.begin(), g_strokes.end());
+                        PushUndoState();
                         g_strokes.clear();
                     }
                     break;
@@ -2234,6 +2581,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // Eraser Tool Left-Click: start Brush Erase Drag
         if (g_currentTool == ToolMode::Eraser) {
+            PushUndoState();
             g_isLeftClickErasing = true;
             SetCapture(hwnd);
             EraseBrushAt(x, y, g_eraserRadius);
@@ -2246,6 +2594,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             float adjY = (y - g_panOffsetY) / g_zoomScale;
 
             g_currentStroke.points.clear();
+            g_currentStroke.InvalidateCache();
             g_currentStroke.points.push_back({ adjX, adjY });
             g_currentStroke.startPt = { adjX, adjY };
             g_currentStroke.endPt = { adjX, adjY };
@@ -2253,7 +2602,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_currentStroke.color = g_activeColor;
             g_currentStroke.isHighlighter = (g_currentTool == ToolMode::Highlighter);
             g_currentStroke.width = g_currentStroke.isHighlighter ? g_settings.defaultHighlighterWidth : g_settings.defaultPenWidth;
-            g_redoStack.clear();
         }
 
         InvalidateOverlay();
@@ -2285,14 +2633,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_isDrawing = false;
             if (g_currentStroke.shapeType == ShapeType::Freehand) {
                 if (g_currentStroke.points.size() > 1) {
+                    PushUndoState();
+                    g_currentStroke.ComputeBounds();
+                    BuildStrokeGeometry(g_currentStroke);
                     g_strokes.push_back(g_currentStroke);
                 }
             }
             else {
                 if (DistanceSq(g_currentStroke.startPt.x, g_currentStroke.startPt.y, g_currentStroke.endPt.x, g_currentStroke.endPt.y) > 4.0f) {
+                    PushUndoState();
+                    g_currentStroke.ComputeBounds();
                     g_strokes.push_back(g_currentStroke);
                 }
             }
+            g_currentStroke.points.clear();
+            g_currentStroke.InvalidateCache();
             InvalidateOverlay();
         }
         return 0;
@@ -2304,6 +2659,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // In Eraser Mode: Right-Click clears whole shape under cursor!
         if (g_currentTool == ToolMode::Eraser) {
+            PushUndoState();
             g_isRightClickClearing = true;
             SetCapture(hwnd);
             EraseWholeShapeAt(x, y, g_eraserRadius);
@@ -2426,13 +2782,14 @@ void ShowOverlay() {
         RegisterClassExW(&wc);
 
         g_hOverlayWnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             wc.lpszClassName,
             L"Screen Inking Overlay",
             WS_POPUP,
             vx, vy, vw, vh,
             NULL, NULL, wc.hInstance, NULL
         );
+        SetLayeredWindowAttributes(g_hOverlayWnd, 0, 255, LWA_ALPHA);
 
         CreateD2DResources(g_hOverlayWnd);
     }
@@ -2469,8 +2826,8 @@ void HideOverlay() {
         KillTimer(g_hOverlayWnd, 1);
         KillTimer(g_hOverlayWnd, 2);
         LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
-        if (exStyle & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) {
-            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT));
+        if (exStyle & WS_EX_TRANSPARENT) {
+            SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
             SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         }
         ShowWindow(g_hOverlayWnd, SW_HIDE);
@@ -2503,6 +2860,8 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
 }
 
 DWORD WINAPI HotkeyThread(LPVOID) {
+    CoInitialize(NULL);
+
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
     wc.lpfnWndProc = HotkeyWndProc;
     wc.hInstance = GetModuleHandleW(NULL);
@@ -2525,6 +2884,9 @@ DWORD WINAPI HotkeyThread(LPVOID) {
 
     UnregisterHotKey(g_hHotkeyWnd, kHotkeyId);
     DestroyWindow(g_hHotkeyWnd);
+    g_hHotkeyWnd = NULL;
+
+    CoUninitialize();
     return 0;
 }
 
@@ -2539,7 +2901,7 @@ BOOL Wh_ModInit() {
 
     CoInitialize(NULL);
 
-    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_pD2DFactory);
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, &g_pD2DFactory);
     if (FAILED(hr)) {
         Wh_Log(L"Failed to create Direct2D Factory");
         return FALSE;
@@ -2626,7 +2988,7 @@ BOOL Wh_ModInit() {
         IID_PPV_ARGS(&g_pWICFactory)
     );
 
-    CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
+    g_hHotkeyThread = CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
 
     Wh_Log(L"WinDraw: Ready (All features active. Press Hotkey to annotate)");
     return TRUE;
@@ -2641,10 +3003,22 @@ void Wh_ModUninit() {
         PostMessage(g_hHotkeyWnd, WM_QUIT, 0, 0);
     }
 
+    if (g_hHotkeyThread) {
+        WaitForSingleObject(g_hHotkeyThread, 2000);
+        CloseHandle(g_hHotkeyThread);
+        g_hHotkeyThread = NULL;
+    }
+
     if (g_hOverlayWnd) {
         DestroyWindow(g_hOverlayWnd);
         g_hOverlayWnd = NULL;
     }
+
+    // Clean up all strokes and cached geometries before releasing D2D factory
+    g_strokes.clear();
+    g_undoStack.clear();
+    g_redoStack.clear();
+    g_currentStroke.InvalidateCache();
 
     ReleaseD2DResources();
 

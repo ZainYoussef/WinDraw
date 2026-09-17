@@ -476,6 +476,9 @@ static int g_hoveredGridFlyoutItem = -1;
 static ULONGLONG g_toastStartTime = 0;
 static std::wstring g_toastMessage = L"";
 
+// Eraser Undo State Tracking
+static bool g_hasPushedUndoForCurrentErase = false;
+
 // Brush & Zoom size preview timer
 static ULONGLONG g_sizePreviewTime = 0;
 static ULONGLONG g_zoomPreviewTime = 0;
@@ -542,6 +545,8 @@ void UpdateTrayIcon(HWND hwnd);
 void RemoveTrayIcon();
 void StartSnipping();
 void CancelSnipping();
+bool PreparePristineBackdrop();
+void CaptureFullScreenSnapshot();
 void SaveCroppedSnapshot(int left, int top, int width, int height);
 void DrawSnippingOverlay(ID2D1HwndRenderTarget* pRT);
 void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT);
@@ -2062,10 +2067,7 @@ void RebuildGridBrush() {
             pBitmapRT->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.72f, 0.95f, 0.38f), &pDotBrush);
             if (pDotBrush) {
                 float r = (S >= 48) ? 1.25f : 1.0f;
-                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(0.0f, 0.0f), r, r), pDotBrush);
-                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)S, 0.0f), r, r), pDotBrush);
-                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(0.0f, (float)S), r, r), pDotBrush);
-                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)S, (float)S), r, r), pDotBrush);
+                pBitmapRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)S * 0.5f, (float)S * 0.5f), r, r), pDotBrush);
                 pDotBrush->Release();
             }
         }
@@ -2073,8 +2075,8 @@ void RebuildGridBrush() {
             ID2D1SolidColorBrush* pLineBrush = nullptr;
             pBitmapRT->CreateSolidColorBrush(D2D1::ColorF(0.50f, 0.68f, 0.90f, 0.22f), &pLineBrush);
             if (pLineBrush) {
-                pBitmapRT->DrawLine(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F((float)S, 0.0f), pLineBrush, 1.0f);
-                pBitmapRT->DrawLine(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, (float)S), pLineBrush, 1.0f);
+                pBitmapRT->DrawLine(D2D1::Point2F(0.0f, 0.5f), D2D1::Point2F((float)S, 0.5f), pLineBrush, 1.0f);
+                pBitmapRT->DrawLine(D2D1::Point2F(0.5f, 0.0f), D2D1::Point2F(0.5f, (float)S), pLineBrush, 1.0f);
                 pLineBrush->Release();
             }
         }
@@ -2396,10 +2398,11 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
         }
 
         bool hit = false;
+        float effR = adjustedRadius + it->width * 0.5f;
+        float effRSq = effR * effR;
+
         if (it->shapeType == ShapeType::Freehand) {
             const auto& pts = it->points;
-            float effR = adjustedRadius + it->width * 0.5f;
-            float effRSq = effR * effR;
             for (size_t i = 0; i < pts.size(); ++i) {
                 if (DistanceSq(adjustedX, adjustedY, pts[i].x, pts[i].y) <= effRSq) {
                     hit = true;
@@ -2413,9 +2416,35 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
                 }
             }
         }
-        else if (it->shapeType == ShapeType::Line || it->shapeType == ShapeType::Arrow) {
-            if (DistToSegmentSq(adjustedX, adjustedY, it->startPt.x, it->startPt.y, it->endPt.x, it->endPt.y) <= rSq) {
+        else if (it->shapeType == ShapeType::Line) {
+            if (DistToSegmentSq(adjustedX, adjustedY, it->startPt.x, it->startPt.y, it->endPt.x, it->endPt.y) <= effRSq) {
                 hit = true;
+            }
+        }
+        else if (it->shapeType == ShapeType::Arrow) {
+            if (DistToSegmentSq(adjustedX, adjustedY, it->startPt.x, it->startPt.y, it->endPt.x, it->endPt.y) <= effRSq) {
+                hit = true;
+            }
+            if (!hit) {
+                // Check arrowhead wings/fins
+                float dx = it->endPt.x - it->startPt.x;
+                float dy = it->endPt.y - it->startPt.y;
+                float len = std::sqrt(dx * dx + dy * dy);
+                if (len > 0.001f) {
+                    float ux = dx / len;
+                    float uy = dy / len;
+                    float arrowLen = std::min(std::max(it->width * 3.5f, 16.0f), len * 0.45f);
+                    float wingW = arrowLen * 0.55f;
+                    float bx = it->endPt.x - ux * arrowLen;
+                    float by = it->endPt.y - uy * arrowLen;
+                    D2D1_POINT_2F pLeft = D2D1::Point2F(bx - uy * wingW, by + ux * wingW);
+                    D2D1_POINT_2F pRight = D2D1::Point2F(bx + uy * wingW, by - ux * wingW);
+                    if (DistToSegmentSq(adjustedX, adjustedY, it->endPt.x, it->endPt.y, pLeft.x, pLeft.y) <= effRSq ||
+                        DistToSegmentSq(adjustedX, adjustedY, it->endPt.x, it->endPt.y, pRight.x, pRight.y) <= effRSq ||
+                        DistToSegmentSq(adjustedX, adjustedY, pLeft.x, pLeft.y, pRight.x, pRight.y) <= effRSq) {
+                        hit = true;
+                    }
+                }
             }
         }
         else if (it->shapeType == ShapeType::Rectangle) {
@@ -2423,10 +2452,10 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
             float maxX = std::max(it->startPt.x, it->endPt.x);
             float minY = std::min(it->startPt.y, it->endPt.y);
             float maxY = std::max(it->startPt.y, it->endPt.y);
-            if (DistToSegmentSq(adjustedX, adjustedY, minX, minY, maxX, minY) <= rSq ||
-                DistToSegmentSq(adjustedX, adjustedY, maxX, minY, maxX, maxY) <= rSq ||
-                DistToSegmentSq(adjustedX, adjustedY, maxX, maxY, minX, maxY) <= rSq ||
-                DistToSegmentSq(adjustedX, adjustedY, minX, maxY, minX, minY) <= rSq) {
+            if (DistToSegmentSq(adjustedX, adjustedY, minX, minY, maxX, minY) <= effRSq ||
+                DistToSegmentSq(adjustedX, adjustedY, maxX, minY, maxX, maxY) <= effRSq ||
+                DistToSegmentSq(adjustedX, adjustedY, maxX, maxY, minX, maxY) <= effRSq ||
+                DistToSegmentSq(adjustedX, adjustedY, minX, maxY, minX, minY) <= effRSq) {
                 hit = true;
             }
         }
@@ -2439,7 +2468,7 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
             float dy = adjustedY - cy;
             float dist = std::sqrt(dx * dx + dy * dy);
             float avgR = (rx + ry) * 0.5f;
-            if (std::abs(dist - avgR) <= adjustedRadius) {
+            if (std::abs(dist - avgR) <= effR) {
                 hit = true;
             }
         }
@@ -2449,14 +2478,18 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
             float minY = std::min(it->startPt.y, it->endPt.y);
             float maxY = std::max(it->startPt.y, it->endPt.y);
             float midX = (minX + maxX) * 0.5f;
-            if (DistToSegmentSq(adjustedX, adjustedY, midX, minY, minX, maxY) <= rSq ||
-                DistToSegmentSq(adjustedX, adjustedY, minX, maxY, maxX, maxY) <= rSq ||
-                DistToSegmentSq(adjustedX, adjustedY, maxX, maxY, midX, minY) <= rSq) {
+            if (DistToSegmentSq(adjustedX, adjustedY, midX, minY, minX, maxY) <= effRSq ||
+                DistToSegmentSq(adjustedX, adjustedY, minX, maxY, maxX, maxY) <= effRSq ||
+                DistToSegmentSq(adjustedX, adjustedY, maxX, maxY, midX, minY) <= effRSq) {
                 hit = true;
             }
         }
 
         if (hit) {
+            if (!g_hasPushedUndoForCurrentErase) {
+                PushUndoState();
+                g_hasPushedUndoForCurrentErase = true;
+            }
             it = g_strokes.erase(it);
             changed = true;
         }
@@ -2525,10 +2558,6 @@ void SaveBitmapToPNG(HBITMAP hBitmap, const std::wstring& filePath) {
     pWicBitmap->Release();
 }
 
-void CopySnapshotToClipboard() {
-    StartSnipping();
-}
-
 void CancelSnipping() {
     g_hideUIForCapture = false;
     if (!g_isSnipping) return;
@@ -2541,8 +2570,11 @@ void CancelSnipping() {
     InvalidateOverlay();
 }
 
-void StartSnipping() {
-    if (g_isSnipping) return;
+bool PreparePristineBackdrop() {
+    if (g_hSnipBackdrop) {
+        DeleteObject(g_hSnipBackdrop);
+        g_hSnipBackdrop = NULL;
+    }
 
     if (g_currentTool == ToolMode::Pointer) {
         SetToolMode(ToolMode::Pen);
@@ -2550,11 +2582,6 @@ void StartSnipping() {
 
     if (!g_bIsActive) {
         ShowOverlay();
-    }
-
-    if (g_hSnipBackdrop) {
-        DeleteObject(g_hSnipBackdrop);
-        g_hSnipBackdrop = NULL;
     }
 
     // Temporarily hide toolbar / HUD / radial / cursor to take a pristine snapshot
@@ -2572,13 +2599,14 @@ void StartSnipping() {
     int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     if (vw <= 0 || vh <= 0) {
         g_hideUIForCapture = false;
-        return;
+        return false;
     }
 
     g_snipBackdropW = vw;
     g_snipBackdropH = vh;
 
     HDC hScreenDC = GetDC(NULL);
+    bool ok = false;
     if (hScreenDC) {
         HDC hMemDC = CreateCompatibleDC(hScreenDC);
         if (hMemDC) {
@@ -2587,18 +2615,38 @@ void StartSnipping() {
                 HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, g_hSnipBackdrop);
                 BitBlt(hMemDC, 0, 0, vw, vh, hScreenDC, vx, vy, SRCCOPY | CAPTUREBLT);
                 SelectObject(hMemDC, hOldBmp);
+                ok = true;
             }
             DeleteDC(hMemDC);
         }
         ReleaseDC(NULL, hScreenDC);
     }
 
-    // Now enter active snipping mode
     g_hideUIForCapture = false;
+    return ok;
+}
+
+void StartSnipping() {
+    if (g_isSnipping) return;
+    if (!PreparePristineBackdrop()) return;
+
+    // Enter active region snipping mode
     g_isSnipping = true;
     g_isSnippingDrag = false;
-
     InvalidateOverlay();
+}
+
+void CaptureFullScreenSnapshot() {
+    if (g_isSnipping) {
+        CancelSnipping();
+    }
+    if (!PreparePristineBackdrop()) return;
+
+    SaveCroppedSnapshot(0, 0, g_snipBackdropW, g_snipBackdropH);
+}
+
+void CopySnapshotToClipboard() {
+    CaptureFullScreenSnapshot();
 }
 
 void SaveCroppedSnapshot(int left, int top, int width, int height) {
@@ -2626,87 +2674,103 @@ void SaveCroppedSnapshot(int left, int top, int width, int height) {
     HDC hDstDC = CreateCompatibleDC(hScreenDC);
     HBITMAP hCroppedBmp = CreateCompatibleBitmap(hScreenDC, width, height);
 
-    if (hSrcDC && hDstDC && hCroppedBmp) {
-        HBITMAP hOldSrc = (HBITMAP)SelectObject(hSrcDC, g_hSnipBackdrop);
-        HBITMAP hOldDst = (HBITMAP)SelectObject(hDstDC, hCroppedBmp);
-
-        BitBlt(hDstDC, 0, 0, width, height, hSrcDC, left, top, SRCCOPY);
-
-        SelectObject(hDstDC, hOldDst);
-        SelectObject(hSrcDC, hOldSrc);
-
-        // Auto-save PNG if enabled
-        bool savedToFile = false;
-        if (g_settings.autoSaveSnapshot) {
-            wchar_t picturesPath[MAX_PATH];
-            if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
-                std::wstring winDrawDir = std::wstring(picturesPath) + L"\\WinDraw";
-                CreateDirectoryW(winDrawDir.c_str(), NULL);
-
-                SYSTEMTIME st;
-                GetLocalTime(&st);
-                wchar_t filename[128];
-                wsprintfW(filename, L"\\WinDraw_%04d-%02d-%02d_%02d%02d%02d.png",
-                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-                std::wstring fullPath = winDrawDir + filename;
-                SaveBitmapToPNG(hCroppedBmp, fullPath);
-                savedToFile = true;
-            }
-        }
-
-        // Place onto clipboard
-        bool clipboardSucceeded = false;
-        if (OpenClipboard(g_hOverlayWnd)) {
-            if (EmptyClipboard()) {
-                BITMAPINFO bmi = {};
-                bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                bmi.bmiHeader.biWidth = width;
-                bmi.bmiHeader.biHeight = height;
-                bmi.bmiHeader.biPlanes = 1;
-                bmi.bmiHeader.biBitCount = 32;
-                bmi.bmiHeader.biCompression = BI_RGB;
-                DWORD dibSize = sizeof(BITMAPINFOHEADER) + width * height * 4;
-                HGLOBAL hDIB = GlobalAlloc(GHND, dibSize);
-                if (hDIB) {
-                    BYTE* pDIB = (BYTE*)GlobalLock(hDIB);
-                    if (pDIB) {
-                        memcpy(pDIB, &bmi.bmiHeader, sizeof(BITMAPINFOHEADER));
-                        GetDIBits(hDstDC, hCroppedBmp, 0, height, pDIB + sizeof(BITMAPINFOHEADER), &bmi, DIB_RGB_COLORS);
-                        GlobalUnlock(hDIB);
-                        SetClipboardData(CF_DIB, hDIB);
-                    } else {
-                        GlobalFree(hDIB);
-                    }
-                }
-
-                if (SetClipboardData(CF_BITMAP, hCroppedBmp)) {
-                    clipboardSucceeded = true;
-                }
-            }
-            CloseClipboard();
-        }
-
-        if (!clipboardSucceeded) {
-            DeleteObject(hCroppedBmp);
-        }
-
-        if (clipboardSucceeded && savedToFile) {
-            g_toastMessage = L"Snapshot saved to Pictures & Clipboard";
-        } else if (clipboardSucceeded) {
-            g_toastMessage = L"Snapshot copied to Clipboard";
-        } else if (savedToFile) {
-            g_toastMessage = L"Snapshot saved to Pictures/WinDraw";
-        } else {
-            g_toastMessage = L"Snapshot capture failed";
-        }
-
-        g_toastStartTime = GetTickCount64();
-        if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, 1, 30, NULL);
+    if (!hSrcDC || !hDstDC || !hCroppedBmp) {
+        if (hCroppedBmp) DeleteObject(hCroppedBmp);
+        if (hDstDC) DeleteDC(hDstDC);
+        if (hSrcDC) DeleteDC(hSrcDC);
+        ReleaseDC(NULL, hScreenDC);
+        CancelSnipping();
+        return;
     }
 
-    if (hDstDC) DeleteDC(hDstDC);
-    if (hSrcDC) DeleteDC(hSrcDC);
+    HBITMAP hOldSrc = (HBITMAP)SelectObject(hSrcDC, g_hSnipBackdrop);
+    HBITMAP hOldDst = (HBITMAP)SelectObject(hDstDC, hCroppedBmp);
+
+    BitBlt(hDstDC, 0, 0, width, height, hSrcDC, left, top, SRCCOPY);
+
+    SelectObject(hDstDC, hOldDst);
+    SelectObject(hSrcDC, hOldSrc);
+
+    // Auto-save PNG if enabled (with millisecond timestamp & overwrite prevention)
+    bool savedToFile = false;
+    if (g_settings.autoSaveSnapshot) {
+        wchar_t picturesPath[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
+            std::wstring winDrawDir = std::wstring(picturesPath) + L"\\WinDraw";
+            CreateDirectoryW(winDrawDir.c_str(), NULL);
+
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            wchar_t filename[128];
+            wsprintfW(filename, L"\\WinDraw_%04d-%02d-%02d_%02d%02d%02d_%03d.png",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+            std::wstring fullPath = winDrawDir + filename;
+            int counter = 1;
+            while (GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES && counter < 100) {
+                wsprintfW(filename, L"\\WinDraw_%04d-%02d-%02d_%02d%02d%02d_%03d_%d.png",
+                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, counter++);
+                fullPath = winDrawDir + filename;
+            }
+
+            SaveBitmapToPNG(hCroppedBmp, fullPath);
+            savedToFile = true;
+        }
+    }
+
+    // Place onto clipboard
+    bool clipboardSucceeded = false;
+    if (OpenClipboard(g_hOverlayWnd)) {
+        if (EmptyClipboard()) {
+            BITMAPINFO bmi = {};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = height;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            DWORD dibSize = sizeof(BITMAPINFOHEADER) + width * height * 4;
+            HGLOBAL hDIB = GlobalAlloc(GHND, dibSize);
+            if (hDIB) {
+                BYTE* pDIB = (BYTE*)GlobalLock(hDIB);
+                if (pDIB) {
+                    memcpy(pDIB, &bmi.bmiHeader, sizeof(BITMAPINFOHEADER));
+                    GetDIBits(hDstDC, hCroppedBmp, 0, height, pDIB + sizeof(BITMAPINFOHEADER), &bmi, DIB_RGB_COLORS);
+                    GlobalUnlock(hDIB);
+                    if (!SetClipboardData(CF_DIB, hDIB)) {
+                        GlobalFree(hDIB);
+                    }
+                } else {
+                    GlobalFree(hDIB);
+                }
+            }
+
+            if (SetClipboardData(CF_BITMAP, hCroppedBmp)) {
+                clipboardSucceeded = true;
+            }
+        }
+        CloseClipboard();
+    }
+
+    if (!clipboardSucceeded) {
+        DeleteObject(hCroppedBmp);
+    }
+
+    if (clipboardSucceeded && savedToFile) {
+        g_toastMessage = L"Snapshot saved to Pictures & Clipboard";
+    } else if (clipboardSucceeded) {
+        g_toastMessage = L"Snapshot copied to Clipboard";
+    } else if (savedToFile) {
+        g_toastMessage = L"Snapshot saved to Pictures/WinDraw";
+    } else {
+        g_toastMessage = L"Snapshot capture failed";
+    }
+
+    g_toastStartTime = GetTickCount64();
+    if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, 1, 30, NULL);
+
+    DeleteDC(hDstDC);
+    DeleteDC(hSrcDC);
     ReleaseDC(NULL, hScreenDC);
 
     CancelSnipping();
@@ -2752,6 +2816,9 @@ void SetToolMode(ToolMode newMode) {
 LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_USER_TOGGLE_POINTER: {
+        if (g_isSnipping) {
+            CancelSnipping();
+        }
         if (g_currentTool == ToolMode::Pointer) {
             SetToolMode(ToolMode::Pen);
             SetForegroundWindow(hwnd);
@@ -2892,17 +2959,27 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 GetCursorPos(&pt);
                 ScreenToClient(hwnd, &pt);
 
-                bool overToolbar = false;
+                bool overInteractive = false;
+                if (g_shapesFlyoutOpen &&
+                    pt.x >= g_shapesFlyoutRect.left && pt.x <= g_shapesFlyoutRect.right &&
+                    pt.y >= g_shapesFlyoutRect.top && pt.y <= g_shapesFlyoutRect.bottom) {
+                    overInteractive = true;
+                }
+                if (g_gridFlyoutOpen &&
+                    pt.x >= g_gridFlyoutRect.left && pt.x <= g_gridFlyoutRect.right &&
+                    pt.y >= g_gridFlyoutRect.top && pt.y <= g_gridFlyoutRect.bottom) {
+                    overInteractive = true;
+                }
                 if (g_settings.showBottomToolbar) {
                     if (pt.x >= (g_toolbarRect.left - 6.0f) && pt.x <= (g_toolbarRect.right + 6.0f) &&
                         pt.y >= (g_toolbarRect.top - 6.0f) && pt.y <= (g_toolbarRect.bottom + 6.0f)) {
-                        overToolbar = true;
+                        overInteractive = true;
                     }
                 }
 
                 LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-                if (overToolbar) {
-                    // Over the toolbar: remove WS_EX_TRANSPARENT so user can hover and click buttons
+                if (overInteractive) {
+                    // Over the toolbar or open flyout: remove WS_EX_TRANSPARENT so user can hover and click
                     if (exStyle & WS_EX_TRANSPARENT) {
                         SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
                         SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
@@ -2974,7 +3051,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S') {
-            StartSnipping();
+            if (GetKeyState(VK_SHIFT) & 0x8000) {
+                CaptureFullScreenSnapshot();
+            }
+            else {
+                StartSnipping();
+            }
             return 0;
         }
         if (wParam == 'G') {
@@ -3202,13 +3284,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (distMoved > 4.0f || (GetTickCount64() - g_rightMouseDownTime > 120)) {
                 if (g_currentTool == ToolMode::Eraser) {
                     if (!g_isRightClickClearing) {
-                        PushUndoState();
                         g_isRightClickClearing = true;
                     }
                 }
                 else {
                     if (!g_isRightClickErasing) {
-                        PushUndoState();
                         g_isRightClickErasing = true;
                     }
                 }
@@ -3243,6 +3323,30 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_currentStroke.points.push_back({ adjX, adjY });
             }
             else {
+                if (GetKeyState(VK_SHIFT) & 0x8000) {
+                    float dx = adjX - g_currentStroke.startPt.x;
+                    float dy = adjY - g_currentStroke.startPt.y;
+
+                    if (g_currentStroke.shapeType == ShapeType::Line || g_currentStroke.shapeType == ShapeType::Arrow) {
+                        float len = std::sqrt(dx * dx + dy * dy);
+                        if (len > 0.001f) {
+                            float angle = std::atan2(dy, dx);
+                            float snapAngle = std::round(angle / (3.14159265f / 4.0f)) * (3.14159265f / 4.0f);
+                            adjX = g_currentStroke.startPt.x + len * std::cos(snapAngle);
+                            adjY = g_currentStroke.startPt.y + len * std::sin(snapAngle);
+                        }
+                    }
+                    else if (g_currentStroke.shapeType == ShapeType::Rectangle || g_currentStroke.shapeType == ShapeType::Ellipse) {
+                        float side = std::max(std::abs(dx), std::abs(dy));
+                        adjX = g_currentStroke.startPt.x + (dx >= 0 ? side : -side);
+                        adjY = g_currentStroke.startPt.y + (dy >= 0 ? side : -side);
+                    }
+                    else if (g_currentStroke.shapeType == ShapeType::Triangle) {
+                        float side = std::max(std::abs(dx), std::abs(dy));
+                        adjX = g_currentStroke.startPt.x + (dx >= 0 ? side : -side);
+                        adjY = g_currentStroke.startPt.y + (dy >= 0 ? (side * 0.866025f) : (-side * 0.866025f));
+                    }
+                }
                 g_currentStroke.endPt = { adjX, adjY };
             }
             InvalidateOverlay();
@@ -3261,6 +3365,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_LBUTTONDOWN: {
         float x = (float)GET_X_LPARAM(lParam);
         float y = (float)GET_Y_LPARAM(lParam);
+        g_hasPushedUndoForCurrentErase = false;
 
         // Clicking the tray icon while WinDraw is open closes WinDraw
         if (IsClickOnTrayIcon()) {
@@ -3291,7 +3396,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Snapshot) {
-                StartSnipping();
+                if (GetKeyState(VK_SHIFT) & 0x8000) {
+                    CaptureFullScreenSnapshot();
+                }
+                else {
+                    StartSnipping();
+                }
             }
             else if (g_radialHoverTarget == RadialTarget::Eraser) {
                 SetToolMode(ToolMode::Eraser);
@@ -3544,7 +3654,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case 10: // Snapshot
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
-                    StartSnipping();
+                    if (GetKeyState(VK_SHIFT) & 0x8000) {
+                        CaptureFullScreenSnapshot();
+                    }
+                    else {
+                        StartSnipping();
+                    }
                     break;
                 case 11: // Undo
                     g_shapesFlyoutOpen = false;
@@ -3590,7 +3705,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // Eraser Tool Left-Click: start Brush Erase Drag
         if (g_currentTool == ToolMode::Eraser) {
-            PushUndoState();
+            g_hasPushedUndoForCurrentErase = false;
             g_isLeftClickErasing = true;
             SetCapture(hwnd);
             EraseBrushAt(x, y, g_eraserRadius);
@@ -3640,6 +3755,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_isLeftClickErasing) {
             ReleaseCapture();
             g_isLeftClickErasing = false;
+            g_hasPushedUndoForCurrentErase = false;
             InvalidateOverlay();
             return 0;
         }
@@ -3679,6 +3795,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_currentStroke.InvalidateCache();
             InvalidateOverlay();
         }
+        g_hasPushedUndoForCurrentErase = false;
         return 0;
     }
 
@@ -3695,6 +3812,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_isRightMouseDown = true;
         g_isRightClickErasing = false;
         g_isRightClickClearing = false;
+        g_hasPushedUndoForCurrentErase = false;
         g_wheelUsedWhileRightMouseDown = false;
         g_rightMouseDownPos.x = (LONG)x;
         g_rightMouseDownPos.y = (LONG)y;
@@ -3711,6 +3829,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_isRightMouseDown = false;
             g_isRightClickErasing = false;
             g_isRightClickClearing = false;
+            g_hasPushedUndoForCurrentErase = false;
             g_wheelUsedWhileRightMouseDown = false;
 
             if (!wasErasing) {
@@ -4104,6 +4223,7 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 SetMenuDefaultItem(hMenu, 1, FALSE);
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenuW(hMenu, MF_STRING, 2, L"Take Snapshot\t(Ctrl+S)");
+                AppendMenuW(hMenu, MF_STRING, 5, L"Full-Screen Snapshot\t(Ctrl+Shift+S)");
                 UINT clearFlags = (g_bIsActive && !g_strokes.empty()) ? MF_STRING : (MF_STRING | MF_GRAYED | MF_DISABLED);
                 AppendMenuW(hMenu, clearFlags, 3, L"Clear Canvas\t(C)");
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
@@ -4120,6 +4240,9 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 }
                 else if (cmd == 2) {
                     StartSnipping();
+                }
+                else if (cmd == 5) {
+                    CaptureFullScreenSnapshot();
                 }
                 else if (cmd == 3) {
                     if (g_bIsActive && !g_strokes.empty()) {
@@ -4374,5 +4497,13 @@ void Wh_ModSettingsChanged() {
         UnregisterHotKey(g_hHotkeyWnd, kHotkeyId);
         RegisterHotKey(g_hHotkeyWnd, kHotkeyId, g_settings.hotkeyMod, g_settings.hotkeyKey);
         PostMessageW(g_hHotkeyWnd, WM_USER_UPDATE_TRAY, 0, 0);
+    }
+
+    if (g_hOverlayWnd && IsWindow(g_hOverlayWnd)) {
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        BuildToolbarLayout(vw, vh);
+        RebuildGridBrush();
+        InvalidateOverlay();
     }
 }

@@ -361,7 +361,7 @@ static IWICImagingFactory* g_pWICFactory = NULL;
 static std::vector<Stroke> g_strokes;
 static std::vector<std::vector<Stroke>> g_undoStack;
 static std::vector<std::vector<Stroke>> g_redoStack;
-static const size_t kMaxUndoLevels = 30;
+static const size_t kMaxUndoLevels = 20;
 
 void PushUndoState() {
     g_undoStack.push_back(g_strokes);
@@ -654,6 +654,30 @@ void ReleaseD2DResources() {
 void InvalidateOverlay() {
     if (g_hOverlayWnd) {
         InvalidateRect(g_hOverlayWnd, NULL, FALSE);
+    }
+}
+
+void PerformUndo() {
+    if (!g_undoStack.empty()) {
+        g_redoStack.push_back(std::move(g_strokes));
+        if (g_redoStack.size() > kMaxUndoLevels) {
+            g_redoStack.erase(g_redoStack.begin());
+        }
+        g_strokes = std::move(g_undoStack.back());
+        g_undoStack.pop_back();
+        InvalidateOverlay();
+    }
+}
+
+void PerformRedo() {
+    if (!g_redoStack.empty()) {
+        g_undoStack.push_back(std::move(g_strokes));
+        if (g_undoStack.size() > kMaxUndoLevels) {
+            g_undoStack.erase(g_undoStack.begin());
+        }
+        g_strokes = std::move(g_redoStack.back());
+        g_redoStack.pop_back();
+        InvalidateOverlay();
     }
 }
 
@@ -2025,33 +2049,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') {
             if (GetKeyState(VK_SHIFT) & 0x8000) {
-                // Redo (Ctrl+Shift+Z)
-                if (!g_redoStack.empty()) {
-                    g_undoStack.push_back(std::move(g_strokes));
-                    g_strokes = std::move(g_redoStack.back());
-                    g_redoStack.pop_back();
-                    InvalidateOverlay();
-                }
+                PerformRedo();
             }
             else {
-                // Undo (Ctrl+Z)
-                if (!g_undoStack.empty()) {
-                    g_redoStack.push_back(std::move(g_strokes));
-                    g_strokes = std::move(g_undoStack.back());
-                    g_undoStack.pop_back();
-                    InvalidateOverlay();
-                }
+                PerformUndo();
             }
             return 0;
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Y') {
-            // Redo (Ctrl+Y)
-            if (!g_redoStack.empty()) {
-                g_undoStack.push_back(std::move(g_strokes));
-                g_strokes = std::move(g_redoStack.back());
-                g_redoStack.pop_back();
-                InvalidateOverlay();
-            }
+            PerformRedo();
             return 0;
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S') {
@@ -2355,18 +2361,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     CopySnapshotToClipboard();
                     break;
                 case 11: // Undo
-                    if (!g_undoStack.empty()) {
-                        g_redoStack.push_back(std::move(g_strokes));
-                        g_strokes = std::move(g_undoStack.back());
-                        g_undoStack.pop_back();
-                    }
+                    PerformUndo();
                     break;
                 case 12: // Redo
-                    if (!g_redoStack.empty()) {
-                        g_undoStack.push_back(std::move(g_strokes));
-                        g_strokes = std::move(g_redoStack.back());
-                        g_redoStack.pop_back();
-                    }
+                    PerformRedo();
                     break;
                 case 13: // Clear
                     if (!g_strokes.empty()) {

@@ -349,6 +349,7 @@ static bool g_bIsActive = false;
 static ID2D1Factory* g_pD2DFactory = NULL;
 static ID2D1HwndRenderTarget* g_pRenderTarget = NULL;
 static ID2D1StrokeStyle* g_pRoundStrokeStyle = NULL;
+static ID2D1SolidColorBrush* g_pStrokeBrush = NULL;
 static ID2D1Bitmap* g_pDesktopBitmap = NULL;
 static IDWriteFactory* g_pDWriteFactory = NULL;
 static IDWriteTextFormat* g_pTextFormat = NULL;
@@ -633,6 +634,10 @@ HRESULT CreateD2DResources(HWND hwnd) {
             );
         }
 
+        if (!g_pStrokeBrush) {
+            g_pRenderTarget->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1.0f), &g_pStrokeBrush);
+        }
+
         CaptureDesktop();
     }
 
@@ -640,6 +645,7 @@ HRESULT CreateD2DResources(HWND hwnd) {
 }
 
 void ReleaseD2DResources() {
+    if (g_pStrokeBrush) { g_pStrokeBrush->Release(); g_pStrokeBrush = nullptr; }
     if (g_pDesktopBitmap) { g_pDesktopBitmap->Release(); g_pDesktopBitmap = nullptr; }
     if (g_pRoundStrokeStyle) { g_pRoundStrokeStyle->Release(); g_pRoundStrokeStyle = nullptr; }
     if (g_pRenderTarget) { g_pRenderTarget->Release(); g_pRenderTarget = nullptr; }
@@ -865,108 +871,158 @@ void DrawArrowhead(ID2D1HwndRenderTarget* pRT, ID2D1SolidColorBrush* pBrush, flo
 
 void BuildStrokeGeometry(Stroke& stroke) {
     if (stroke.pCachedGeometry) return;
-    if (stroke.shapeType != ShapeType::Freehand || stroke.points.size() <= 1) return;
     if (!g_pD2DFactory) return;
 
-    ID2D1PathGeometry* pGeometry = nullptr;
-    if (SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pGeometry))) {
-        ID2D1GeometrySink* pSink = nullptr;
-        if (SUCCEEDED(pGeometry->Open(&pSink))) {
-            pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
-            pSink->BeginFigure(
-                D2D1::Point2F(stroke.points[0].x, stroke.points[0].y),
-                D2D1_FIGURE_BEGIN_HOLLOW
-            );
+    if (stroke.shapeType == ShapeType::Freehand) {
+        if (stroke.points.size() <= 1) return;
 
-            if (stroke.points.size() == 2) {
-                pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
+        ID2D1PathGeometry* pGeometry = nullptr;
+        if (SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pGeometry))) {
+            ID2D1GeometrySink* pSink = nullptr;
+            if (SUCCEEDED(pGeometry->Open(&pSink))) {
+                pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
+                pSink->BeginFigure(
+                    D2D1::Point2F(stroke.points[0].x, stroke.points[0].y),
+                    D2D1_FIGURE_BEGIN_HOLLOW
+                );
+
+                if (stroke.points.size() == 2) {
+                    pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
+                }
+                else {
+                    for (size_t i = 1; i < stroke.points.size() - 1; ++i) {
+                        D2D1_POINT_2F midPoint = D2D1::Point2F(
+                            (stroke.points[i].x + stroke.points[i + 1].x) * 0.5f,
+                            (stroke.points[i].y + stroke.points[i + 1].y) * 0.5f
+                        );
+                        pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                            D2D1::Point2F(stroke.points[i].x, stroke.points[i].y),
+                            midPoint
+                        ));
+                    }
+                    pSink->AddLine(D2D1::Point2F(stroke.points.back().x, stroke.points.back().y));
+                }
+
+                pSink->EndFigure(D2D1_FIGURE_END_OPEN);
+                pSink->Close();
+                pSink->Release();
+
+                stroke.pCachedGeometry = pGeometry;
             }
             else {
-                for (size_t i = 1; i < stroke.points.size() - 1; ++i) {
-                    D2D1_POINT_2F midPoint = D2D1::Point2F(
-                        (stroke.points[i].x + stroke.points[i + 1].x) * 0.5f,
-                        (stroke.points[i].y + stroke.points[i + 1].y) * 0.5f
-                    );
-                    pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
-                        D2D1::Point2F(stroke.points[i].x, stroke.points[i].y),
-                        midPoint
-                    ));
-                }
-                pSink->AddLine(D2D1::Point2F(stroke.points.back().x, stroke.points.back().y));
+                pGeometry->Release();
             }
-
-            pSink->EndFigure(D2D1_FIGURE_END_OPEN);
-            pSink->Close();
-            pSink->Release();
-
-            stroke.pCachedGeometry = pGeometry;
         }
-        else {
-            pGeometry->Release();
+    }
+    else if (stroke.shapeType == ShapeType::Arrow) {
+        float dx = stroke.endPt.x - stroke.startPt.x;
+        float dy = stroke.endPt.y - stroke.startPt.y;
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1.0f) return;
+
+        float ux = dx / len;
+        float uy = dy / len;
+        float arrowLen = std::max(12.0f, stroke.width * 3.5f);
+        float arrowW = arrowLen * 0.55f;
+
+        float basePx = stroke.endPt.x - ux * arrowLen;
+        float basePy = stroke.endPt.y - uy * arrowLen;
+
+        float leftX = basePx - uy * arrowW;
+        float leftY = basePy + ux * arrowW;
+        float rightX = basePx + uy * arrowW;
+        float rightY = basePy - ux * arrowW;
+
+        ID2D1PathGeometry* pArrowGeo = nullptr;
+        if (SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pArrowGeo))) {
+            ID2D1GeometrySink* pSink = nullptr;
+            if (SUCCEEDED(pArrowGeo->Open(&pSink))) {
+                pSink->BeginFigure(D2D1::Point2F(stroke.endPt.x, stroke.endPt.y), D2D1_FIGURE_BEGIN_FILLED);
+                pSink->AddLine(D2D1::Point2F(leftX, leftY));
+                pSink->AddLine(D2D1::Point2F(rightX, rightY));
+                pSink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                pSink->Close();
+                pSink->Release();
+
+                stroke.pCachedGeometry = pArrowGeo;
+            }
+            else {
+                pArrowGeo->Release();
+            }
         }
     }
 }
 
 void DrawSmoothStroke(ID2D1HwndRenderTarget* pRT, Stroke& stroke) {
-    if (!g_inkVisible) return;
+    if (!g_inkVisible || !g_pStrokeBrush) return;
 
-    ID2D1SolidColorBrush* pBrush = nullptr;
     D2D1_COLOR_F c = stroke.color;
     if (stroke.isHighlighter) {
         c.a = 0.35f;
     }
-    pRT->CreateSolidColorBrush(c, &pBrush);
-    if (!pBrush) return;
+    g_pStrokeBrush->SetColor(c);
 
     if (stroke.shapeType == ShapeType::Line) {
         pRT->DrawLine(
             D2D1::Point2F(stroke.startPt.x, stroke.startPt.y),
             D2D1::Point2F(stroke.endPt.x, stroke.endPt.y),
-            pBrush, stroke.width, g_pRoundStrokeStyle
+            g_pStrokeBrush, stroke.width, g_pRoundStrokeStyle
         );
     }
     else if (stroke.shapeType == ShapeType::Arrow) {
         pRT->DrawLine(
             D2D1::Point2F(stroke.startPt.x, stroke.startPt.y),
             D2D1::Point2F(stroke.endPt.x, stroke.endPt.y),
-            pBrush, stroke.width, g_pRoundStrokeStyle
+            g_pStrokeBrush, stroke.width, g_pRoundStrokeStyle
         );
-        DrawArrowhead(pRT, pBrush, stroke.startPt.x, stroke.startPt.y, stroke.endPt.x, stroke.endPt.y, stroke.width);
+        if (stroke.pCachedGeometry) {
+            pRT->FillGeometry(stroke.pCachedGeometry, g_pStrokeBrush);
+        }
+        else {
+            if (&stroke != &g_currentStroke) {
+                BuildStrokeGeometry(stroke);
+                if (stroke.pCachedGeometry) {
+                    pRT->FillGeometry(stroke.pCachedGeometry, g_pStrokeBrush);
+                }
+            }
+            else {
+                DrawArrowhead(pRT, g_pStrokeBrush, stroke.startPt.x, stroke.startPt.y, stroke.endPt.x, stroke.endPt.y, stroke.width);
+            }
+        }
     }
     else if (stroke.shapeType == ShapeType::Rectangle) {
         float minX = std::min(stroke.startPt.x, stroke.endPt.x);
         float maxX = std::max(stroke.startPt.x, stroke.endPt.x);
         float minY = std::min(stroke.startPt.y, stroke.endPt.y);
         float maxY = std::max(stroke.startPt.y, stroke.endPt.y);
-        pRT->DrawRectangle(D2D1::RectF(minX, minY, maxX, maxY), pBrush, stroke.width);
+        pRT->DrawRectangle(D2D1::RectF(minX, minY, maxX, maxY), g_pStrokeBrush, stroke.width);
     }
     else if (stroke.shapeType == ShapeType::Ellipse) {
         float cx = (stroke.startPt.x + stroke.endPt.x) * 0.5f;
         float cy = (stroke.startPt.y + stroke.endPt.y) * 0.5f;
         float rx = std::abs(stroke.endPt.x - stroke.startPt.x) * 0.5f;
         float ry = std::abs(stroke.endPt.y - stroke.startPt.y) * 0.5f;
-        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rx, ry), pBrush, stroke.width);
+        pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rx, ry), g_pStrokeBrush, stroke.width);
     }
     else {
         // Freehand Inking with Quadratic Bézier smoothing
         if (stroke.points.empty()) {
-            pBrush->Release();
             return;
         }
 
         if (stroke.points.size() == 1) {
             float r = stroke.width * 0.5f;
-            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y), r, r), pBrush);
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y), r, r), g_pStrokeBrush);
         }
         else {
             if (stroke.pCachedGeometry) {
-                pRT->DrawGeometry(stroke.pCachedGeometry, pBrush, stroke.width, g_pRoundStrokeStyle);
+                pRT->DrawGeometry(stroke.pCachedGeometry, g_pStrokeBrush, stroke.width, g_pRoundStrokeStyle);
             }
             else {
                 if (&stroke != &g_currentStroke) {
                     BuildStrokeGeometry(stroke);
                     if (stroke.pCachedGeometry) {
-                        pRT->DrawGeometry(stroke.pCachedGeometry, pBrush, stroke.width, g_pRoundStrokeStyle);
+                        pRT->DrawGeometry(stroke.pCachedGeometry, g_pStrokeBrush, stroke.width, g_pRoundStrokeStyle);
                     }
                 }
                 else {
@@ -1002,7 +1058,7 @@ void DrawSmoothStroke(ID2D1HwndRenderTarget* pRT, Stroke& stroke) {
                             pSink->Close();
                             pSink->Release();
 
-                            pRT->DrawGeometry(pGeometry, pBrush, stroke.width, g_pRoundStrokeStyle);
+                            pRT->DrawGeometry(pGeometry, g_pStrokeBrush, stroke.width, g_pRoundStrokeStyle);
                         }
                         pGeometry->Release();
                     }
@@ -1010,8 +1066,6 @@ void DrawSmoothStroke(ID2D1HwndRenderTarget* pRT, Stroke& stroke) {
             }
         }
     }
-
-    pBrush->Release();
 }
 
 void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
@@ -1494,249 +1548,8 @@ void RenderOverlay() {
 }
 
 // ----------------------------------------------------------------------------
-// Erasing Logic (Brush Eraser & Whole-Shape Eraser)
+// Erasing Logic (Whole-Stroke Eraser)
 // ----------------------------------------------------------------------------
-
-void EraseBrushAt(float x, float y, float radius) {
-    float adjustedRadius = radius / g_zoomScale;
-    float rSq = adjustedRadius * adjustedRadius;
-    bool changed = false;
-    float adjustedX = (x - g_panOffsetX) / g_zoomScale;
-    float adjustedY = (y - g_panOffsetY) / g_zoomScale;
-
-    float eraserMinX = adjustedX - adjustedRadius;
-    float eraserMaxX = adjustedX + adjustedRadius;
-    float eraserMinY = adjustedY - adjustedRadius;
-    float eraserMaxY = adjustedY + adjustedRadius;
-
-    std::vector<Stroke> resultingStrokes;
-    resultingStrokes.reserve(g_strokes.size() + 8);
-
-    for (auto& stroke : g_strokes) {
-        // Fast-fail AABB check
-        if (eraserMaxX < stroke.bounds.left || eraserMinX > stroke.bounds.right ||
-            eraserMaxY < stroke.bounds.top  || eraserMinY > stroke.bounds.bottom) {
-            resultingStrokes.push_back(stroke);
-            continue;
-        }
-
-        if (stroke.shapeType == ShapeType::Freehand) {
-            bool touches = false;
-            for (size_t i = 0; i < stroke.points.size(); ++i) {
-                if (DistanceSq(adjustedX, adjustedY, stroke.points[i].x, stroke.points[i].y) <= rSq) {
-                    touches = true;
-                    break;
-                }
-                if (i + 1 < stroke.points.size()) {
-                    if (DistToSegmentSq(adjustedX, adjustedY, stroke.points[i].x, stroke.points[i].y, stroke.points[i + 1].x, stroke.points[i + 1].y) <= rSq) {
-                        touches = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!touches) {
-                resultingStrokes.push_back(stroke);
-                continue;
-            }
-
-            changed = true;
-            std::vector<StrokePoint> detailed;
-            detailed.reserve(stroke.points.size() * 2);
-            for (size_t i = 0; i < stroke.points.size(); ++i) {
-                detailed.push_back(stroke.points[i]);
-                if (i + 1 < stroke.points.size()) {
-                    float dx = stroke.points[i + 1].x - stroke.points[i].x;
-                    float dy = stroke.points[i + 1].y - stroke.points[i].y;
-                    float d = std::sqrt(dx * dx + dy * dy);
-                    float step = std::max(1.0f, adjustedRadius * 0.35f);
-                    if (d > step) {
-                        int steps = (int)(d / step);
-                        for (int s = 1; s < steps; ++s) {
-                            float t = (float)s / (float)steps;
-                            detailed.push_back({ stroke.points[i].x + dx * t, stroke.points[i].y + dy * t });
-                        }
-                    }
-                }
-            }
-
-            std::vector<StrokePoint> curSeg;
-            for (const auto& pt : detailed) {
-                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
-                    if (!curSeg.empty()) {
-                        Stroke subStroke = stroke;
-                        subStroke.points = curSeg;
-                        subStroke.InvalidateCache();
-                        BuildStrokeGeometry(subStroke);
-                        resultingStrokes.push_back(subStroke);
-                        curSeg.clear();
-                    }
-                }
-                else {
-                    curSeg.push_back(pt);
-                }
-            }
-            if (!curSeg.empty()) {
-                Stroke subStroke = stroke;
-                subStroke.points = curSeg;
-                subStroke.InvalidateCache();
-                BuildStrokeGeometry(subStroke);
-                resultingStrokes.push_back(subStroke);
-            }
-        }
-        else if (stroke.shapeType == ShapeType::Line || stroke.shapeType == ShapeType::Arrow) {
-            if (DistToSegmentSq(adjustedX, adjustedY, stroke.startPt.x, stroke.startPt.y, stroke.endPt.x, stroke.endPt.y) > rSq) {
-                resultingStrokes.push_back(stroke);
-                continue;
-            }
-
-            changed = true;
-            float dx = stroke.endPt.x - stroke.startPt.x;
-            float dy = stroke.endPt.y - stroke.startPt.y;
-            float len = std::sqrt(dx * dx + dy * dy);
-            float step = std::max(1.0f, adjustedRadius * 0.35f);
-            int steps = (int)(len / step);
-            if (steps < 2) steps = 2;
-
-            std::vector<StrokePoint> curSeg;
-            for (int s = 0; s <= steps; ++s) {
-                float t = (float)s / (float)steps;
-                float px = stroke.startPt.x + dx * t;
-                float py = stroke.startPt.y + dy * t;
-                if (DistanceSq(adjustedX, adjustedY, px, py) <= rSq) {
-                    if (!curSeg.empty()) {
-                        Stroke subStroke = stroke;
-                        subStroke.shapeType = ShapeType::Freehand;
-                        subStroke.points = curSeg;
-                        subStroke.InvalidateCache();
-                        BuildStrokeGeometry(subStroke);
-                        resultingStrokes.push_back(subStroke);
-                        curSeg.clear();
-                    }
-                }
-                else {
-                    curSeg.push_back({ px, py });
-                }
-            }
-            if (!curSeg.empty()) {
-                Stroke subStroke = stroke;
-                subStroke.shapeType = ShapeType::Freehand;
-                subStroke.points = curSeg;
-                subStroke.InvalidateCache();
-                BuildStrokeGeometry(subStroke);
-                resultingStrokes.push_back(subStroke);
-            }
-        }
-        else if (stroke.shapeType == ShapeType::Rectangle) {
-            float minX = std::min(stroke.startPt.x, stroke.endPt.x);
-            float maxX = std::max(stroke.startPt.x, stroke.endPt.x);
-            float minY = std::min(stroke.startPt.y, stroke.endPt.y);
-            float maxY = std::max(stroke.startPt.y, stroke.endPt.y);
-
-            bool touches = (DistToSegmentSq(adjustedX, adjustedY, minX, minY, maxX, minY) <= rSq ||
-                            DistToSegmentSq(adjustedX, adjustedY, maxX, minY, maxX, maxY) <= rSq ||
-                            DistToSegmentSq(adjustedX, adjustedY, maxX, maxY, minX, maxY) <= rSq ||
-                            DistToSegmentSq(adjustedX, adjustedY, minX, maxY, minX, minY) <= rSq);
-            if (!touches) {
-                resultingStrokes.push_back(stroke);
-                continue;
-            }
-
-            changed = true;
-            std::vector<StrokePoint> rectPts;
-            float step = std::max(1.0f, adjustedRadius * 0.35f);
-            for (float px = minX; px < maxX; px += step) rectPts.push_back({ px, minY });
-            for (float py = minY; py < maxY; py += step) rectPts.push_back({ maxX, py });
-            for (float px = maxX; px > minX; px -= step) rectPts.push_back({ px, maxY });
-            for (float py = maxY; py > minY; py -= step) rectPts.push_back({ minX, py });
-            rectPts.push_back({ minX, minY });
-
-            std::vector<StrokePoint> curSeg;
-            for (const auto& pt : rectPts) {
-                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
-                    if (!curSeg.empty()) {
-                        Stroke subStroke = stroke;
-                        subStroke.shapeType = ShapeType::Freehand;
-                        subStroke.points = curSeg;
-                        subStroke.InvalidateCache();
-                        BuildStrokeGeometry(subStroke);
-                        resultingStrokes.push_back(subStroke);
-                        curSeg.clear();
-                    }
-                }
-                else {
-                    curSeg.push_back(pt);
-                }
-            }
-            if (!curSeg.empty()) {
-                Stroke subStroke = stroke;
-                subStroke.shapeType = ShapeType::Freehand;
-                subStroke.points = curSeg;
-                subStroke.InvalidateCache();
-                BuildStrokeGeometry(subStroke);
-                resultingStrokes.push_back(subStroke);
-            }
-        }
-        else if (stroke.shapeType == ShapeType::Ellipse) {
-            float cx = (stroke.startPt.x + stroke.endPt.x) * 0.5f;
-            float cy = (stroke.startPt.y + stroke.endPt.y) * 0.5f;
-            float rx = std::abs(stroke.endPt.x - stroke.startPt.x) * 0.5f;
-            float ry = std::abs(stroke.endPt.y - stroke.startPt.y) * 0.5f;
-
-            std::vector<StrokePoint> ellPts;
-            int numPts = 120;
-            for (int k = 0; k <= numPts; ++k) {
-                float angle = (float)(k * (2.0 * 3.14159265358979323846 / numPts));
-                ellPts.push_back({ cx + rx * std::cos(angle), cy + ry * std::sin(angle) });
-            }
-
-            bool touches = false;
-            for (const auto& pt : ellPts) {
-                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
-                    touches = true;
-                    break;
-                }
-            }
-
-            if (!touches) {
-                resultingStrokes.push_back(stroke);
-                continue;
-            }
-
-            changed = true;
-            std::vector<StrokePoint> curSeg;
-            for (const auto& pt : ellPts) {
-                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
-                    if (!curSeg.empty()) {
-                        Stroke subStroke = stroke;
-                        subStroke.shapeType = ShapeType::Freehand;
-                        subStroke.points = curSeg;
-                        subStroke.InvalidateCache();
-                        BuildStrokeGeometry(subStroke);
-                        resultingStrokes.push_back(subStroke);
-                        curSeg.clear();
-                    }
-                }
-                else {
-                    curSeg.push_back(pt);
-                }
-            }
-            if (!curSeg.empty()) {
-                Stroke subStroke = stroke;
-                subStroke.shapeType = ShapeType::Freehand;
-                subStroke.points = curSeg;
-                subStroke.InvalidateCache();
-                BuildStrokeGeometry(subStroke);
-                resultingStrokes.push_back(subStroke);
-            }
-        }
-    }
-
-    if (changed) {
-        g_strokes = std::move(resultingStrokes);
-        InvalidateOverlay();
-    }
-}
 
 bool EraseWholeShapeAt(float x, float y, float radius) {
     float adjustedRadius = radius / g_zoomScale;
@@ -1818,6 +1631,10 @@ bool EraseWholeShapeAt(float x, float y, float radius) {
         InvalidateOverlay();
     }
     return changed;
+}
+
+void EraseBrushAt(float x, float y, float radius) {
+    EraseWholeShapeAt(x, y, radius);
 }
 
 // ----------------------------------------------------------------------------
@@ -2643,6 +2460,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (DistanceSq(g_currentStroke.startPt.x, g_currentStroke.startPt.y, g_currentStroke.endPt.x, g_currentStroke.endPt.y) > 4.0f) {
                     PushUndoState();
                     g_currentStroke.ComputeBounds();
+                    BuildStrokeGeometry(g_currentStroke);
                     g_strokes.push_back(g_currentStroke);
                 }
             }

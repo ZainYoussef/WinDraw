@@ -232,6 +232,9 @@ static ID2D1StrokeStyle* g_pRoundStrokeStyle = NULL;
 static ID2D1Bitmap* g_pDesktopBitmap = NULL;
 static IDWriteFactory* g_pDWriteFactory = NULL;
 static IDWriteTextFormat* g_pTextFormat = NULL;
+static IDWriteTextFormat* g_pIconFormat = NULL;
+static IDWriteTextFormat* g_pRadialIconFormat = NULL;
+static IDWriteTextFormat* g_pCenterBadgeFormat = NULL;
 static IWICImagingFactory* g_pWICFactory = NULL;
 
 static std::vector<Stroke> g_strokes;
@@ -254,11 +257,14 @@ static POINT g_panStartPos = { 0, 0 };
 // Right-click eraser tracking
 static bool g_isRightMouseDown = false;
 static bool g_isRightClickErasing = false;
+static bool g_wheelUsedWhileRightMouseDown = false;
+static bool g_isLeftClickErasing = false;
+static bool g_isRightClickClearing = false;
 static POINT g_rightMouseDownPos = { 0, 0 };
 static ULONGLONG g_rightMouseDownTime = 0;
 static float g_cursorX = 0;
 static float g_cursorY = 0;
-static const float kEraserRadius = 24.0f;
+static float g_eraserRadius = 24.0f;
 
 // Radial Menu State
 enum class RadialTarget {
@@ -317,12 +323,35 @@ void ReleaseD2DResources();
 void InvalidateOverlay();
 void RenderOverlay();
 void CopySnapshotToClipboard();
-void EraseAt(float x, float y, float radius);
+void EraseBrushAt(float x, float y, float radius);
+bool EraseWholeShapeAt(float x, float y, float radius);
 void SaveBitmapToPNG(HBITMAP hBitmap, const std::wstring& filePath);
 
 // ----------------------------------------------------------------------------
 // Utility Math & Geometry
 // ----------------------------------------------------------------------------
+
+static const wchar_t* GetIconFontFamilyName() {
+    static const wchar_t* s_fontName = nullptr;
+    if (s_fontName) return s_fontName;
+
+    if (g_pDWriteFactory) {
+        IDWriteFontCollection* pFontCollection = nullptr;
+        if (SUCCEEDED(g_pDWriteFactory->GetSystemFontCollection(&pFontCollection, FALSE)) && pFontCollection) {
+            UINT32 index = 0;
+            BOOL exists = FALSE;
+            if (SUCCEEDED(pFontCollection->FindFamilyName(L"Segoe Fluent Icons", &index, &exists)) && exists) {
+                s_fontName = L"Segoe Fluent Icons";
+            } else {
+                s_fontName = L"Segoe MDL2 Assets";
+            }
+            pFontCollection->Release();
+            return s_fontName;
+        }
+    }
+    s_fontName = L"Segoe Fluent Icons";
+    return s_fontName;
+}
 
 static float DistanceSq(float x1, float y1, float x2, float y2) {
     float dx = x1 - x2;
@@ -475,7 +504,7 @@ void BuildToolbarLayout(int screenW, int screenH) {
     ToolbarButton dockBtn;
     dockBtn.id = 0;
     dockBtn.isPen = false;
-    dockBtn.label = L"»";
+    dockBtn.label = L"\uE75E"; // GripperTool
     dockBtn.rect = D2D1::RectF(curX, padY, curX + 20.0f, padY + btnH);
     g_toolbarButtons.push_back(dockBtn);
     curX += 20.0f + itemGap;
@@ -498,7 +527,13 @@ void BuildToolbarLayout(int screenW, int screenH) {
 
     // Group 2: Shapes (Freehand, Line, Arrow, Rect, Ellipse)
     int shapeIds[] = { 20, 21, 22, 23, 24 };
-    const wchar_t* shapeLabels[] = { L"✎", L"╱", L"➔", L"▭", L"◯" };
+    const wchar_t* shapeLabels[] = {
+        L"\uEC87", // Freehand (Draw)
+        L"\uED5E", // Line (Ruler)
+        L"\uE72A", // Arrow (Forward)
+        L"\uE739", // Rect (Checkbox)
+        L"\uEA3A"  // Ellipse (CircleRing)
+    };
     for (int i = 0; i < 5; ++i) {
         ToolbarButton btn;
         btn.id = shapeIds[i];
@@ -516,7 +551,13 @@ void BuildToolbarLayout(int screenW, int screenH) {
 
     // Group 3: Navigation Tools (Highlighter, Eraser, Pan, Pointer, Eye)
     int toolIds[] = { 1, 2, 3, 4, 5 };
-    const wchar_t* toolLabels[] = { L"HL", L"ER", L"✣", L"↖", L"👁" };
+    const wchar_t* toolLabels[] = {
+        L"\uE7E6", // Highlighter (Highlight)
+        L"\uE75C", // Eraser (EraseTool)
+        L"\uE7C2", // Pan (Move - 4-way arrows)
+        L"\uE7C9", // Pointer (TouchPointer)
+        L"\uE890"  // Eye (View)
+    };
     for (int i = 0; i < 5; ++i) {
         ToolbarButton btn;
         btn.id = toolIds[i];
@@ -534,7 +575,12 @@ void BuildToolbarLayout(int screenW, int screenH) {
 
     // Group 4: Snapshot, Undo, Redo, Clear
     int actionIds[] = { 10, 11, 12, 13 };
-    const wchar_t* actionLabels[] = { L"📷", L"↩", L"↪", L"🗑" };
+    const wchar_t* actionLabels[] = {
+        L"\uE722", // Snapshot (Camera)
+        L"\uE7A7", // Undo
+        L"\uE7A6", // Redo
+        L"\uE74D"  // Clear (Delete)
+    };
     for (int i = 0; i < 4; ++i) {
         ToolbarButton btn;
         btn.id = actionIds[i];
@@ -554,7 +600,7 @@ void BuildToolbarLayout(int screenW, int screenH) {
     ToolbarButton exitBtn;
     exitBtn.id = 99;
     exitBtn.isPen = false;
-    exitBtn.label = L"✕";
+    exitBtn.label = L"\uE8BB"; // Exit (ChromeClose)
     exitBtn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
     g_toolbarButtons.push_back(exitBtn);
     curX += btnW + 6.0f;
@@ -804,16 +850,17 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                 }
             }
 
-            // Draw label
-            if (g_pTextFormat && !btn.label.empty()) {
+            // Draw label / icon
+            if (g_pIconFormat && !btn.label.empty()) {
                 ID2D1SolidColorBrush* pLblBrush = isToolActive ? nullptr : pTextBrush;
                 if (isToolActive) {
                     pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.90f, 0.75f, 1.0f), &pLblBrush);
                 }
+                const wchar_t* iconText = (btn.id == 5) ? (g_inkVisible ? L"\uE890" : L"\uED1A") : btn.label.c_str();
                 pRT->DrawText(
-                    btn.label.c_str(),
-                    (UINT32)btn.label.length(),
-                    g_pTextFormat,
+                    iconText,
+                    (UINT32)wcslen(iconText),
+                    g_pIconFormat,
                     btn.rect,
                     pLblBrush,
                     D2D1_DRAW_TEXT_OPTIONS_NONE
@@ -882,14 +929,14 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
 
     // 4. Draw the 8 Sector Action Icons
     const wchar_t* sectorIcons[] = {
-        L"🗑", // 0: East (0°) Clear All
-        L"📷", // 1: SE (45°) Snapshot
-        L"🧹", // 2: South (90°) Eraser
-        L"↩", // 3: SW (135°) Undo
-        L"👆", // 4: West (180°) Pointer
-        L"👁", // 5: NW (225°) Ink Visible
-        L"✋", // 6: North (270°) Pan
-        L"✎"  // 7: NE (315°) Draw / Pen
+        L"\uE74D", // 0: East (0°) Clear All (Delete)
+        L"\uE722", // 1: SE (45°) Snapshot (Camera)
+        L"\uE75C", // 2: South (90°) Eraser (EraseTool)
+        L"\uE7A7", // 3: SW (135°) Undo
+        L"\uE7C9", // 4: West (180°) Pointer (TouchPointer)
+        g_inkVisible ? L"\uE890" : L"\uED1A", // 5: NW (225°) Ink Visible (View / Hide)
+        L"\uE7C2", // 6: North (270°) Pan (Move - 4-way arrows)
+        L"\uEC87"  // 7: NE (315°) Draw / Pen (Draw)
     };
 
     for (int k = 0; k < 8; ++k) {
@@ -898,10 +945,10 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
         float iy = cy + std::sin(secAngle) * kActionIconR;
 
         D2D1_RECT_F iconRect = D2D1::RectF(ix - 16.0f, iy - 16.0f, ix + 16.0f, iy + 16.0f);
-        if (g_pTextFormat) {
+        if (g_pRadialIconFormat) {
             pRT->DrawText(
-                sectorIcons[k], 1,
-                g_pTextFormat,
+                sectorIcons[k], (UINT32)wcslen(sectorIcons[k]),
+                g_pRadialIconFormat,
                 iconRect,
                 pTextBrush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE
@@ -925,13 +972,13 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
         pActiveBrush->Release();
     }
 
-    const wchar_t* centerBadge = (g_currentTool == ToolMode::Highlighter) ? L"🖍" : L"✎";
-    if (g_pTextFormat) {
+    const wchar_t* centerBadge = (g_currentTool == ToolMode::Highlighter) ? L"\uE7E6" : L"\uEC87";
+    if (g_pCenterBadgeFormat) {
         D2D1_RECT_F centerTextRect = D2D1::RectF(cx - 14.0f, cy - 14.0f, cx + 14.0f, cy + 14.0f);
         ID2D1SolidColorBrush* pWhite = nullptr;
         pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &pWhite);
         if (pWhite) {
-            pRT->DrawText(centerBadge, 1, g_pTextFormat, centerTextRect, pWhite);
+            pRT->DrawText(centerBadge, (UINT32)wcslen(centerBadge), g_pCenterBadgeFormat, centerTextRect, pWhite);
             pWhite->Release();
         }
     }
@@ -976,7 +1023,7 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
 }
 
 void DrawEraserCursor(ID2D1HwndRenderTarget* pRT) {
-    if (!g_isRightClickErasing && g_currentTool != ToolMode::Eraser) return;
+    if (!g_isRightClickErasing && !g_isRightMouseDown && !g_isLeftClickErasing && !g_isRightClickClearing && g_currentTool != ToolMode::Eraser) return;
 
     ID2D1SolidColorBrush* pFillBrush = nullptr;
     ID2D1SolidColorBrush* pRingBrush = nullptr;
@@ -984,7 +1031,7 @@ void DrawEraserCursor(ID2D1HwndRenderTarget* pRT) {
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 0.22f), &pFillBrush);
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 0.90f), &pRingBrush);
 
-    D2D1_ELLIPSE ell = D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), kEraserRadius, kEraserRadius);
+    D2D1_ELLIPSE ell = D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), g_eraserRadius, g_eraserRadius);
     pRT->FillEllipse(ell, pFillBrush);
     pRT->DrawEllipse(ell, pRingBrush, 1.5f);
 
@@ -1035,7 +1082,7 @@ void DrawToast(ID2D1HwndRenderTarget* pRT, int screenW, int screenH) {
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.32f, 0.85f, 0.69f, 0.90f * alpha), &pBorder);
     pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.98f, 1.00f, 1.00f * alpha), &pText);
 
-    const float tw = 320.0f;
+    const float tw = 340.0f;
     const float th = 40.0f;
     D2D1_RECT_F toastRect = D2D1::RectF(
         (screenW - tw) * 0.5f,
@@ -1047,7 +1094,22 @@ void DrawToast(ID2D1HwndRenderTarget* pRT, int screenW, int screenH) {
     pRT->FillRoundedRectangle(D2D1::RoundedRect(toastRect, 6.0f, 6.0f), pBg);
     pRT->DrawRoundedRectangle(D2D1::RoundedRect(toastRect, 6.0f, 6.0f), pBorder, 1.2f);
 
-    pRT->DrawText(g_toastMessage.c_str(), (UINT32)g_toastMessage.length(), g_pTextFormat, toastRect, pText);
+    if (g_pIconFormat && g_pTextFormat) {
+        D2D1_RECT_F iconRect = D2D1::RectF(toastRect.left + 12.0f, toastRect.top, toastRect.left + 36.0f, toastRect.bottom);
+        D2D1_RECT_F textRect = D2D1::RectF(toastRect.left + 38.0f, toastRect.top, toastRect.right - 12.0f, toastRect.bottom);
+
+        ID2D1SolidColorBrush* pCheckBrush = nullptr;
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.32f, 0.85f, 0.69f, 1.00f * alpha), &pCheckBrush);
+        pRT->DrawText(L"\uE73E", 1, g_pIconFormat, iconRect, pCheckBrush ? pCheckBrush : pText);
+        if (pCheckBrush) pCheckBrush->Release();
+
+        g_pTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        pRT->DrawText(g_toastMessage.c_str(), (UINT32)g_toastMessage.length(), g_pTextFormat, textRect, pText);
+        g_pTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+    else if (g_pTextFormat) {
+        pRT->DrawText(g_toastMessage.c_str(), (UINT32)g_toastMessage.length(), g_pTextFormat, toastRect, pText);
+    }
 
     if (pText) pText->Release();
     if (pBorder) pBorder->Release();
@@ -1104,14 +1166,224 @@ void RenderOverlay() {
 }
 
 // ----------------------------------------------------------------------------
-// Erasing Logic
+// Erasing Logic (Brush Eraser & Whole-Shape Eraser)
 // ----------------------------------------------------------------------------
 
-void EraseAt(float x, float y, float radius) {
+void EraseBrushAt(float x, float y, float radius) {
     float rSq = radius * radius;
     bool changed = false;
+    float adjustedX = x - g_panOffsetX;
+    float adjustedY = y - g_panOffsetY;
 
-    // Adjust for Pan offset
+    std::vector<Stroke> resultingStrokes;
+    resultingStrokes.reserve(g_strokes.size() + 8);
+
+    for (auto& stroke : g_strokes) {
+        if (stroke.shapeType == ShapeType::Freehand) {
+            bool touches = false;
+            for (size_t i = 0; i < stroke.points.size(); ++i) {
+                if (DistanceSq(adjustedX, adjustedY, stroke.points[i].x, stroke.points[i].y) <= rSq) {
+                    touches = true;
+                    break;
+                }
+                if (i + 1 < stroke.points.size()) {
+                    if (DistToSegmentSq(adjustedX, adjustedY, stroke.points[i].x, stroke.points[i].y, stroke.points[i + 1].x, stroke.points[i + 1].y) <= rSq) {
+                        touches = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!touches) {
+                resultingStrokes.push_back(stroke);
+                continue;
+            }
+
+            changed = true;
+            std::vector<StrokePoint> detailed;
+            detailed.reserve(stroke.points.size() * 2);
+            for (size_t i = 0; i < stroke.points.size(); ++i) {
+                detailed.push_back(stroke.points[i]);
+                if (i + 1 < stroke.points.size()) {
+                    float dx = stroke.points[i + 1].x - stroke.points[i].x;
+                    float dy = stroke.points[i + 1].y - stroke.points[i].y;
+                    float d = std::sqrt(dx * dx + dy * dy);
+                    float step = std::max(2.0f, radius * 0.35f);
+                    if (d > step) {
+                        int steps = (int)(d / step);
+                        for (int s = 1; s < steps; ++s) {
+                            float t = (float)s / (float)steps;
+                            detailed.push_back({ stroke.points[i].x + dx * t, stroke.points[i].y + dy * t });
+                        }
+                    }
+                }
+            }
+
+            std::vector<StrokePoint> curSeg;
+            for (const auto& pt : detailed) {
+                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
+                    if (!curSeg.empty()) {
+                        Stroke subStroke = stroke;
+                        subStroke.points = curSeg;
+                        resultingStrokes.push_back(subStroke);
+                        curSeg.clear();
+                    }
+                }
+                else {
+                    curSeg.push_back(pt);
+                }
+            }
+            if (!curSeg.empty()) {
+                Stroke subStroke = stroke;
+                subStroke.points = curSeg;
+                resultingStrokes.push_back(subStroke);
+            }
+        }
+        else if (stroke.shapeType == ShapeType::Line || stroke.shapeType == ShapeType::Arrow) {
+            if (DistToSegmentSq(adjustedX, adjustedY, stroke.startPt.x, stroke.startPt.y, stroke.endPt.x, stroke.endPt.y) > rSq) {
+                resultingStrokes.push_back(stroke);
+                continue;
+            }
+
+            changed = true;
+            float dx = stroke.endPt.x - stroke.startPt.x;
+            float dy = stroke.endPt.y - stroke.startPt.y;
+            float len = std::sqrt(dx * dx + dy * dy);
+            float step = std::max(2.0f, radius * 0.35f);
+            int steps = (int)(len / step);
+            if (steps < 2) steps = 2;
+
+            std::vector<StrokePoint> curSeg;
+            for (int s = 0; s <= steps; ++s) {
+                float t = (float)s / (float)steps;
+                float px = stroke.startPt.x + dx * t;
+                float py = stroke.startPt.y + dy * t;
+                if (DistanceSq(adjustedX, adjustedY, px, py) <= rSq) {
+                    if (!curSeg.empty()) {
+                        Stroke subStroke = stroke;
+                        subStroke.shapeType = ShapeType::Freehand;
+                        subStroke.points = curSeg;
+                        resultingStrokes.push_back(subStroke);
+                        curSeg.clear();
+                    }
+                }
+                else {
+                    curSeg.push_back({ px, py });
+                }
+            }
+            if (!curSeg.empty()) {
+                Stroke subStroke = stroke;
+                subStroke.shapeType = ShapeType::Freehand;
+                subStroke.points = curSeg;
+                resultingStrokes.push_back(subStroke);
+            }
+        }
+        else if (stroke.shapeType == ShapeType::Rectangle) {
+            float minX = std::min(stroke.startPt.x, stroke.endPt.x);
+            float maxX = std::max(stroke.startPt.x, stroke.endPt.x);
+            float minY = std::min(stroke.startPt.y, stroke.endPt.y);
+            float maxY = std::max(stroke.startPt.y, stroke.endPt.y);
+
+            bool touches = (DistToSegmentSq(adjustedX, adjustedY, minX, minY, maxX, minY) <= rSq ||
+                            DistToSegmentSq(adjustedX, adjustedY, maxX, minY, maxX, maxY) <= rSq ||
+                            DistToSegmentSq(adjustedX, adjustedY, maxX, maxY, minX, maxY) <= rSq ||
+                            DistToSegmentSq(adjustedX, adjustedY, minX, maxY, minX, minY) <= rSq);
+            if (!touches) {
+                resultingStrokes.push_back(stroke);
+                continue;
+            }
+
+            changed = true;
+            std::vector<StrokePoint> rectPts;
+            float step = std::max(2.0f, radius * 0.35f);
+            for (float px = minX; px < maxX; px += step) rectPts.push_back({ px, minY });
+            for (float py = minY; py < maxY; py += step) rectPts.push_back({ maxX, py });
+            for (float px = maxX; px > minX; px -= step) rectPts.push_back({ px, maxY });
+            for (float py = maxY; py > minY; py -= step) rectPts.push_back({ minX, py });
+            rectPts.push_back({ minX, minY });
+
+            std::vector<StrokePoint> curSeg;
+            for (const auto& pt : rectPts) {
+                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
+                    if (!curSeg.empty()) {
+                        Stroke subStroke = stroke;
+                        subStroke.shapeType = ShapeType::Freehand;
+                        subStroke.points = curSeg;
+                        resultingStrokes.push_back(subStroke);
+                        curSeg.clear();
+                    }
+                }
+                else {
+                    curSeg.push_back(pt);
+                }
+            }
+            if (!curSeg.empty()) {
+                Stroke subStroke = stroke;
+                subStroke.shapeType = ShapeType::Freehand;
+                subStroke.points = curSeg;
+                resultingStrokes.push_back(subStroke);
+            }
+        }
+        else if (stroke.shapeType == ShapeType::Ellipse) {
+            float cx = (stroke.startPt.x + stroke.endPt.x) * 0.5f;
+            float cy = (stroke.startPt.y + stroke.endPt.y) * 0.5f;
+            float rx = std::abs(stroke.endPt.x - stroke.startPt.x) * 0.5f;
+            float ry = std::abs(stroke.endPt.y - stroke.startPt.y) * 0.5f;
+
+            std::vector<StrokePoint> ellPts;
+            int numPts = 120;
+            for (int k = 0; k <= numPts; ++k) {
+                float angle = (float)(k * (2.0 * 3.14159265358979323846 / numPts));
+                ellPts.push_back({ cx + rx * std::cos(angle), cy + ry * std::sin(angle) });
+            }
+
+            bool touches = false;
+            for (const auto& pt : ellPts) {
+                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
+                    touches = true;
+                    break;
+                }
+            }
+
+            if (!touches) {
+                resultingStrokes.push_back(stroke);
+                continue;
+            }
+
+            changed = true;
+            std::vector<StrokePoint> curSeg;
+            for (const auto& pt : ellPts) {
+                if (DistanceSq(adjustedX, adjustedY, pt.x, pt.y) <= rSq) {
+                    if (!curSeg.empty()) {
+                        Stroke subStroke = stroke;
+                        subStroke.shapeType = ShapeType::Freehand;
+                        subStroke.points = curSeg;
+                        resultingStrokes.push_back(subStroke);
+                        curSeg.clear();
+                    }
+                }
+                else {
+                    curSeg.push_back(pt);
+                }
+            }
+            if (!curSeg.empty()) {
+                Stroke subStroke = stroke;
+                subStroke.shapeType = ShapeType::Freehand;
+                subStroke.points = curSeg;
+                resultingStrokes.push_back(subStroke);
+            }
+        }
+    }
+
+    if (changed) {
+        g_strokes = std::move(resultingStrokes);
+        InvalidateOverlay();
+    }
+}
+
+bool EraseWholeShapeAt(float x, float y, float radius) {
+    float rSq = radius * radius;
+    bool changed = false;
     float adjustedX = x - g_panOffsetX;
     float adjustedY = y - g_panOffsetY;
 
@@ -1132,8 +1404,33 @@ void EraseAt(float x, float y, float radius) {
                 }
             }
         }
-        else {
+        else if (it->shapeType == ShapeType::Line || it->shapeType == ShapeType::Arrow) {
             if (DistToSegmentSq(adjustedX, adjustedY, it->startPt.x, it->startPt.y, it->endPt.x, it->endPt.y) <= rSq) {
+                hit = true;
+            }
+        }
+        else if (it->shapeType == ShapeType::Rectangle) {
+            float minX = std::min(it->startPt.x, it->endPt.x);
+            float maxX = std::max(it->startPt.x, it->endPt.x);
+            float minY = std::min(it->startPt.y, it->endPt.y);
+            float maxY = std::max(it->startPt.y, it->endPt.y);
+            if (DistToSegmentSq(adjustedX, adjustedY, minX, minY, maxX, minY) <= rSq ||
+                DistToSegmentSq(adjustedX, adjustedY, maxX, minY, maxX, maxY) <= rSq ||
+                DistToSegmentSq(adjustedX, adjustedY, maxX, maxY, minX, maxY) <= rSq ||
+                DistToSegmentSq(adjustedX, adjustedY, minX, maxY, minX, minY) <= rSq) {
+                hit = true;
+            }
+        }
+        else if (it->shapeType == ShapeType::Ellipse) {
+            float cx = (it->startPt.x + it->endPt.x) * 0.5f;
+            float cy = (it->startPt.y + it->endPt.y) * 0.5f;
+            float rx = std::abs(it->endPt.x - it->startPt.x) * 0.5f;
+            float ry = std::abs(it->endPt.y - it->startPt.y) * 0.5f;
+            float dx = adjustedX - cx;
+            float dy = adjustedY - cy;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            float avgR = (rx + ry) * 0.5f;
+            if (std::abs(dist - avgR) <= radius) {
                 hit = true;
             }
         }
@@ -1151,6 +1448,7 @@ void EraseAt(float x, float y, float radius) {
     if (changed) {
         InvalidateOverlay();
     }
+    return changed;
 }
 
 // ----------------------------------------------------------------------------
@@ -1238,11 +1536,11 @@ void CopySnapshotToClipboard() {
 
             std::wstring fullPath = winDrawDir + filename;
             SaveBitmapToPNG(hBitmap, fullPath);
-            g_toastMessage = L"✓ Saved to Pictures/WinDraw & Clipboard";
+            g_toastMessage = L"Saved to Pictures/WinDraw & Clipboard";
         }
     }
     else {
-        g_toastMessage = L"✓ Copied to Clipboard";
+        g_toastMessage = L"Copied to Clipboard";
     }
 
     SelectObject(hMemDC, hOldBmp);
@@ -1270,6 +1568,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         float step = (delta > 0) ? 1.0f : -1.0f;
+
+        // Holding Right-click OR in Eraser Mode: Scroll wheel resizes eraser radius!
+        if (g_isRightMouseDown || g_isRightClickErasing || g_currentTool == ToolMode::Eraser) {
+            g_wheelUsedWhileRightMouseDown = true;
+            g_eraserRadius = std::max(6.0f, std::min(150.0f, g_eraserRadius + step * 3.0f));
+            InvalidateOverlay();
+            return 0;
+        }
+
         if (g_currentTool == ToolMode::Highlighter) {
             g_settings.defaultHighlighterWidth = std::max(4.0f, std::min(80.0f, g_settings.defaultHighlighterWidth + step * 2.0f));
             g_currentPenWidth = g_settings.defaultHighlighterWidth;
@@ -1444,14 +1751,28 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             InvalidateOverlay();
         }
 
-        // Right-Click Hold Eraser
-        if (g_isRightMouseDown) {
+        // Active Left-Click Brush Erase Drag (when in Eraser mode)
+        if (g_isLeftClickErasing) {
+            EraseBrushAt(g_cursorX, g_cursorY, g_eraserRadius);
+            InvalidateOverlay();
+            return 0;
+        }
+
+        // Active Right-Click Whole-Shape Clear Drag (when in Eraser mode)
+        if (g_isRightClickClearing) {
+            EraseWholeShapeAt(g_cursorX, g_cursorY, g_eraserRadius);
+            InvalidateOverlay();
+            return 0;
+        }
+
+        // Right-Click Hold Eraser Brush (in normal drawing modes)
+        if (g_isRightMouseDown && g_currentTool != ToolMode::Eraser) {
             float distMoved = std::sqrt(DistanceSq(g_cursorX, g_cursorY, (float)g_rightMouseDownPos.x, (float)g_rightMouseDownPos.y));
             if (distMoved > 4.0f || (GetTickCount64() - g_rightMouseDownTime > 120)) {
                 g_isRightClickErasing = true;
             }
             if (g_isRightClickErasing) {
-                EraseAt(g_cursorX, g_cursorY, kEraserRadius);
+                EraseBrushAt(g_cursorX, g_cursorY, g_eraserRadius);
                 InvalidateOverlay();
                 return 0;
             }
@@ -1477,6 +1798,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             else {
                 g_currentStroke.endPt = { adjX, adjY };
             }
+            InvalidateOverlay();
+            return 0;
+        }
+
+        // When Eraser mode is active or right-click is held down, red circle follows mouse smoothly!
+        if (g_currentTool == ToolMode::Eraser || g_isRightMouseDown) {
             InvalidateOverlay();
             return 0;
         }
@@ -1617,9 +1944,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        // Eraser Tool Click
+        // Eraser Tool Left-Click: start Brush Erase Drag
         if (g_currentTool == ToolMode::Eraser) {
-            EraseAt(x, y, kEraserRadius);
+            g_isLeftClickErasing = true;
+            SetCapture(hwnd);
+            EraseBrushAt(x, y, g_eraserRadius);
         }
         else {
             // Start Drawing Stroke or Shape
@@ -1644,6 +1973,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_LBUTTONUP: {
+        if (g_isLeftClickErasing) {
+            ReleaseCapture();
+            g_isLeftClickErasing = false;
+            InvalidateOverlay();
+            return 0;
+        }
+
         if (g_isDraggingToolbar) {
             ReleaseCapture();
             g_isDraggingToolbar = false;
@@ -1675,21 +2011,43 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_RBUTTONDOWN: {
+        float x = (float)GET_X_LPARAM(lParam);
+        float y = (float)GET_Y_LPARAM(lParam);
+
+        // In Eraser Mode: Right-Click clears whole shape under cursor!
+        if (g_currentTool == ToolMode::Eraser) {
+            g_isRightClickClearing = true;
+            SetCapture(hwnd);
+            EraseWholeShapeAt(x, y, g_eraserRadius);
+            InvalidateOverlay();
+            return 0;
+        }
+
+        // In Normal Mode: Right-Click hold starts Brush Erase, tap opens radial menu
         g_isRightMouseDown = true;
         g_isRightClickErasing = false;
-        g_rightMouseDownPos.x = GET_X_LPARAM(lParam);
-        g_rightMouseDownPos.y = GET_Y_LPARAM(lParam);
+        g_wheelUsedWhileRightMouseDown = false;
+        g_rightMouseDownPos.x = (LONG)x;
+        g_rightMouseDownPos.y = (LONG)y;
         g_rightMouseDownTime = GetTickCount64();
         SetCapture(hwnd);
+        InvalidateOverlay(); // Shows red eraser cursor immediately
         return 0;
     }
 
     case WM_RBUTTONUP: {
+        if (g_isRightClickClearing) {
+            ReleaseCapture();
+            g_isRightClickClearing = false;
+            InvalidateOverlay();
+            return 0;
+        }
+
         if (g_isRightMouseDown) {
             ReleaseCapture();
             g_isRightMouseDown = false;
 
-            if (!g_isRightClickErasing) {
+            if (!g_isRightClickErasing && !g_wheelUsedWhileRightMouseDown) {
                 // Quick right-click tap: Open Radial Menu!
                 g_radialActive = true;
                 g_radialX = (float)GET_X_LPARAM(lParam);
@@ -1699,6 +2057,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_hoveredOrb = -1;
             }
             g_isRightClickErasing = false;
+            g_wheelUsedWhileRightMouseDown = false;
             InvalidateOverlay();
         }
         return 0;
@@ -1724,7 +2083,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetCursor(LoadCursor(NULL, IDC_SIZEALL));
                 return TRUE;
             }
-            if (g_currentTool == ToolMode::Eraser || g_isRightClickErasing) {
+            if (g_currentTool == ToolMode::Eraser || g_isRightClickErasing || g_isRightMouseDown || g_isLeftClickErasing || g_isRightClickClearing) {
                 SetCursor(LoadCursor(NULL, IDC_CROSS));
                 return TRUE;
             }
@@ -1813,6 +2172,9 @@ void HideOverlay() {
     g_isPanning = false;
     g_isRightMouseDown = false;
     g_isRightClickErasing = false;
+    g_isLeftClickErasing = false;
+    g_isRightClickClearing = false;
+    g_wheelUsedWhileRightMouseDown = false;
 
     if (g_hOverlayWnd) {
         ShowWindow(g_hOverlayWnd, SW_HIDE);
@@ -1895,6 +2257,9 @@ BOOL Wh_ModInit() {
     );
 
     if (g_pDWriteFactory) {
+        const wchar_t* iconFont = GetIconFontFamilyName();
+
+        // General Text Format
         g_pDWriteFactory->CreateTextFormat(
             L"Segoe UI Variable Display",
             NULL,
@@ -1908,6 +2273,54 @@ BOOL Wh_ModInit() {
         if (g_pTextFormat) {
             g_pTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             g_pTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        // Toolbar Icon Format (15.0f Segoe Fluent Icons)
+        g_pDWriteFactory->CreateTextFormat(
+            iconFont,
+            NULL,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            15.0f,
+            L"en-us",
+            &g_pIconFormat
+        );
+        if (g_pIconFormat) {
+            g_pIconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            g_pIconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        // Radial Menu Icon Format (17.0f Segoe Fluent Icons)
+        g_pDWriteFactory->CreateTextFormat(
+            iconFont,
+            NULL,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            17.0f,
+            L"en-us",
+            &g_pRadialIconFormat
+        );
+        if (g_pRadialIconFormat) {
+            g_pRadialIconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            g_pRadialIconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        // Radial Center Badge Format (14.0f Segoe Fluent Icons)
+        g_pDWriteFactory->CreateTextFormat(
+            iconFont,
+            NULL,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            14.0f,
+            L"en-us",
+            &g_pCenterBadgeFormat
+        );
+        if (g_pCenterBadgeFormat) {
+            g_pCenterBadgeFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            g_pCenterBadgeFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
     }
 
@@ -1941,6 +2354,9 @@ void Wh_ModUninit() {
     ReleaseD2DResources();
 
     if (g_pWICFactory) { g_pWICFactory->Release(); g_pWICFactory = nullptr; }
+    if (g_pCenterBadgeFormat) { g_pCenterBadgeFormat->Release(); g_pCenterBadgeFormat = nullptr; }
+    if (g_pRadialIconFormat) { g_pRadialIconFormat->Release(); g_pRadialIconFormat = nullptr; }
+    if (g_pIconFormat) { g_pIconFormat->Release(); g_pIconFormat = nullptr; }
     if (g_pTextFormat) { g_pTextFormat->Release(); g_pTextFormat = nullptr; }
     if (g_pDWriteFactory) { g_pDWriteFactory->Release(); g_pDWriteFactory = nullptr; }
     if (g_pD2DFactory) { g_pD2DFactory->Release(); g_pD2DFactory = nullptr; }

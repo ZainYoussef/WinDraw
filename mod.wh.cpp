@@ -378,6 +378,7 @@ static IDWriteTextFormat* g_pRadialIconFormat = NULL;
 static IDWriteTextFormat* g_pCenterBadgeFormat = NULL;
 static IDWriteTextFormat* g_pMenuTextFormat = NULL;
 static IDWriteTextFormat* g_pMenuKeyFormat = NULL;
+static IDWriteTextFormat* g_pToolbarKeyFormat = NULL;
 static IWICImagingFactory* g_pWICFactory = NULL;
 
 static std::vector<Stroke> g_strokes;
@@ -449,6 +450,7 @@ struct ToolbarButton {
     bool isPen;
     D2D1_COLOR_F penColor;
     bool isToggled;
+    std::wstring shortcut;
 };
 static std::vector<ToolbarButton> g_toolbarButtons;
 static std::vector<float> g_toolbarDividers;
@@ -798,6 +800,7 @@ void BuildToolbarLayout(int screenW, int screenH) {
     dockBtn.isPen = false;
     dockBtn.label = L"\uE75E"; // GripperTool
     dockBtn.rect = D2D1::RectF(curX, padY, curX + 20.0f, padY + btnH);
+    dockBtn.shortcut = L"";
     g_toolbarButtons.push_back(dockBtn);
     curX += 20.0f + itemGap;
 
@@ -808,6 +811,7 @@ void BuildToolbarLayout(int screenW, int screenH) {
         btn.isPen = true;
         btn.penColor = kPresetColors[i];
         btn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
+        btn.shortcut = std::to_wstring(i + 1);
         g_toolbarButtons.push_back(btn);
         curX += btnW + itemGap;
     }
@@ -822,6 +826,7 @@ void BuildToolbarLayout(int screenW, int screenH) {
     freehandBtn.id = 20; // Freehand
     freehandBtn.isPen = false;
     freehandBtn.label = L"\uEC87"; // Freehand (Draw)
+    freehandBtn.shortcut = L"F";
     freehandBtn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
     g_toolbarButtons.push_back(freehandBtn);
     curX += btnW + itemGap;
@@ -830,12 +835,12 @@ void BuildToolbarLayout(int screenW, int screenH) {
     shapesBtn.id = 25; // Shapes Flyout (Line, Arrow, Rectangle, Ellipse, Triangle)
     shapesBtn.isPen = false;
     switch (g_currentShape) {
-        case ShapeType::Line:      shapesBtn.label = L"\uED5E"; break;
-        case ShapeType::Arrow:     shapesBtn.label = L"\uE72A"; break;
-        case ShapeType::Rectangle: shapesBtn.label = L"\uE739"; break;
-        case ShapeType::Ellipse:   shapesBtn.label = L"\uEA3A"; break;
-        case ShapeType::Triangle:  shapesBtn.label = L"\u25B2"; break;
-        default:                   shapesBtn.label = L"\uF158"; break;
+        case ShapeType::Line:      shapesBtn.label = L"\uED5E"; shapesBtn.shortcut = L"L"; break;
+        case ShapeType::Arrow:     shapesBtn.label = L"\uE72A"; shapesBtn.shortcut = L"A"; break;
+        case ShapeType::Rectangle: shapesBtn.label = L"\uE739"; shapesBtn.shortcut = L"R"; break;
+        case ShapeType::Ellipse:   shapesBtn.label = L"\uEA3A"; shapesBtn.shortcut = L"O"; break;
+        case ShapeType::Triangle:  shapesBtn.label = L"\u25B2"; shapesBtn.shortcut = L"T"; break;
+        default:                   shapesBtn.label = L"\uF158"; shapesBtn.shortcut = L"L"; break;
     }
     shapesBtn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
     g_toolbarButtons.push_back(shapesBtn);
@@ -856,11 +861,20 @@ void BuildToolbarLayout(int screenW, int screenH) {
         L"\uE890", // Eye (View)
         L"#"       // Grid (drawn as vector grid icon)
     };
+    const wchar_t* toolShortcuts[] = {
+        L"H",
+        L"E",
+        L"P",
+        L"M",
+        L"V",
+        L"G"
+    };
     for (int i = 0; i < 6; ++i) {
         ToolbarButton btn;
         btn.id = toolIds[i];
         btn.isPen = false;
         btn.label = toolLabels[i];
+        btn.shortcut = toolShortcuts[i];
         btn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
         g_toolbarButtons.push_back(btn);
         curX += btnW + itemGap;
@@ -879,11 +893,18 @@ void BuildToolbarLayout(int screenW, int screenH) {
         L"\uE7A6", // Redo
         L"\uE74D"  // Clear (Delete)
     };
+    const wchar_t* actionShortcuts[] = {
+        L"S",
+        L"Z",
+        L"Y",
+        L"C"
+    };
     for (int i = 0; i < 4; ++i) {
         ToolbarButton btn;
         btn.id = actionIds[i];
         btn.isPen = false;
         btn.label = actionLabels[i];
+        btn.shortcut = actionShortcuts[i];
         btn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
         g_toolbarButtons.push_back(btn);
         curX += btnW + itemGap;
@@ -899,6 +920,7 @@ void BuildToolbarLayout(int screenW, int screenH) {
     exitBtn.id = 99;
     exitBtn.isPen = false;
     exitBtn.label = L"\uE8BB"; // Exit (ChromeClose)
+    exitBtn.shortcut = L"Esc";
     exitBtn.rect = D2D1::RectF(curX, padY, curX + btnW, padY + btnH);
     g_toolbarButtons.push_back(exitBtn);
     curX += btnW + 6.0f;
@@ -1333,6 +1355,39 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                 if (pPenBorder) pPenBorder->Release();
                 pPenBrush->Release();
             }
+
+            // Draw really small shortcut badge on pen swatch (1..5)
+            if (g_pToolbarKeyFormat && !btn.shortcut.empty()) {
+                float pillW = 9.0f;
+                float pillH = 10.0f;
+                float pillR = btn.rect.right - 2.5f;
+                float pillT = btn.rect.top + 2.0f;
+                D2D1_ROUNDED_RECT badgePill = D2D1::RoundedRect(
+                    D2D1::RectF(pillR - pillW, pillT, pillR, pillT + pillH),
+                    2.0f, 2.0f
+                );
+                ID2D1SolidColorBrush* pBadgeBacking = nullptr;
+                pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f), &pBadgeBacking);
+                if (pBadgeBacking) {
+                    pRT->FillRoundedRectangle(badgePill, pBadgeBacking);
+                    pBadgeBacking->Release();
+                }
+
+                ID2D1SolidColorBrush* pBadgeText = nullptr;
+                pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &pBadgeText);
+                if (pBadgeText) {
+                    D2D1_RECT_F textRect = D2D1::RectF(pillR - pillW, pillT, pillR - 1.5f, pillT + pillH);
+                    pRT->DrawText(
+                        btn.shortcut.c_str(),
+                        (UINT32)btn.shortcut.length(),
+                        g_pToolbarKeyFormat,
+                        textRect,
+                        pBadgeText,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE
+                    );
+                    pBadgeText->Release();
+                }
+            }
         }
         else {
             bool isDisabled = (btn.id == 11 && g_undoStack.empty()) ||
@@ -1419,6 +1474,53 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                     pRT->DrawLine(D2D1::Point2F(cx - 2.5f, cy - 1.5f), D2D1::Point2F(cx, cy + 1.5f), pCaretBrush, 1.0f);
                     pRT->DrawLine(D2D1::Point2F(cx, cy + 1.5f), D2D1::Point2F(cx + 2.5f, cy - 1.5f), pCaretBrush, 1.0f);
                     pCaretBrush->Release();
+                }
+            }
+
+            // Draw really small shortcut badge on button (e.g. F, L, H, E, P, M, V, G, S, Z, Y, C, Esc)
+            std::wstring shortcut = btn.shortcut;
+            if (btn.id == 25) {
+                switch (g_currentShape) {
+                    case ShapeType::Line:      shortcut = L"L"; break;
+                    case ShapeType::Arrow:     shortcut = L"A"; break;
+                    case ShapeType::Rectangle: shortcut = L"R"; break;
+                    case ShapeType::Ellipse:   shortcut = L"O"; break;
+                    case ShapeType::Triangle:  shortcut = L"T"; break;
+                    default:                   shortcut = L"L"; break;
+                }
+            }
+
+            if (g_pToolbarKeyFormat && !shortcut.empty()) {
+                ID2D1SolidColorBrush* pKeyBadgeBrush = nullptr;
+                if (isDisabled) {
+                    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.44f, 0.52f, 0.35f), &pKeyBadgeBrush);
+                }
+                else if (isToolActive) {
+                    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.90f, 0.75f, 0.95f), &pKeyBadgeBrush);
+                }
+                else if (isHovered) {
+                    pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.98f, 1.00f, 0.95f), &pKeyBadgeBrush);
+                }
+                else {
+                    pRT->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.62f, 0.72f, 0.75f), &pKeyBadgeBrush);
+                }
+
+                if (pKeyBadgeBrush) {
+                    D2D1_RECT_F keyRect = D2D1::RectF(
+                        btn.rect.left + 2.0f,
+                        btn.rect.top + 2.0f,
+                        btn.rect.right - 3.5f,
+                        btn.rect.top + 12.0f
+                    );
+                    pRT->DrawText(
+                        shortcut.c_str(),
+                        (UINT32)shortcut.length(),
+                        g_pToolbarKeyFormat,
+                        keyRect,
+                        pKeyBadgeBrush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE
+                    );
+                    pKeyBadgeBrush->Release();
                 }
             }
         }
@@ -3037,7 +3139,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             InvalidateOverlay();
             return 0;
         }
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') {
+        if (wParam == 'Z') {
             if (GetKeyState(VK_SHIFT) & 0x8000) {
                 PerformRedo();
             }
@@ -3046,11 +3148,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Y') {
+        if (wParam == 'Y') {
             PerformRedo();
             return 0;
         }
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S') {
+        if (wParam == 'S') {
             if (GetKeyState(VK_SHIFT) & 0x8000) {
                 CaptureFullScreenSnapshot();
             }
@@ -4432,6 +4534,34 @@ BOOL Wh_ModInit() {
             g_pMenuKeyFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
             g_pMenuKeyFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
+
+        // Toolbar Key Badge Format (8.0f Segoe UI Variable Display / Segoe UI, Right-Aligned)
+        HRESULT hrKey = g_pDWriteFactory->CreateTextFormat(
+            L"Segoe UI Variable Display",
+            NULL,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            8.0f,
+            L"en-us",
+            &g_pToolbarKeyFormat
+        );
+        if (FAILED(hrKey)) {
+            g_pDWriteFactory->CreateTextFormat(
+                L"Segoe UI",
+                NULL,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                8.0f,
+                L"en-us",
+                &g_pToolbarKeyFormat
+            );
+        }
+        if (g_pToolbarKeyFormat) {
+            g_pToolbarKeyFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            g_pToolbarKeyFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
     }
 
     CoCreateInstance(
@@ -4477,6 +4607,7 @@ void Wh_ModUninit() {
     ReleaseD2DResources();
 
     if (g_pWICFactory) { g_pWICFactory->Release(); g_pWICFactory = nullptr; }
+    if (g_pToolbarKeyFormat) { g_pToolbarKeyFormat->Release(); g_pToolbarKeyFormat = nullptr; }
     if (g_pMenuKeyFormat) { g_pMenuKeyFormat->Release(); g_pMenuKeyFormat = nullptr; }
     if (g_pMenuTextFormat) { g_pMenuTextFormat->Release(); g_pMenuTextFormat = nullptr; }
     if (g_pCenterBadgeFormat) { g_pCenterBadgeFormat->Release(); g_pCenterBadgeFormat = nullptr; }

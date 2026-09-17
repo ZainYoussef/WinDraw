@@ -6,7 +6,8 @@
 // @author          Zain
 // @github          https://github.com/ZainYoussef/WinDraw
 // @include         explorer.exe
-// @architecture    x86-64, arm64
+// @architecture    x86-64
+// @architecture    arm64
 // @compilerOptions -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ldwmapi -lcomctl32 -lshlwapi -lwindowscodecs -lshell32
 // @license         MIT
 // ==/WindhawkMod==
@@ -728,6 +729,12 @@ inline void RGBtoHSV(D2D1_COLOR_F c, float& h, float& s, float& v) {
     }
     if (h < 0.0f) h += 360.0f;
 }
+
+// Forward declarations for Windhawk local storage persistence
+void SavePersistentRecentColors();
+void SavePersistentCustomColor();
+void SavePersistentToolbarState();
+void LoadPersistentState();
 
 inline void PushRecentColor(D2D1_COLOR_F c) {
     for (auto it = g_recentColors.begin(); it != g_recentColors.end(); ++it) {

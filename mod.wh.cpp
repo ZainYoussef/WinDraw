@@ -68,32 +68,82 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 // ==WindhawkModSettings==
 /*
 - hotkeyMod: 3
-  $name: Hotkey Modifiers
-  $description: 1=Alt, 2=Ctrl, 3=Ctrl+Alt (default), 4=Shift, 8=Win
-- hotkeyKey: 0x47
-  $name: Hotkey Virtual Key Code
-  $description: Virtual key code for activation (0x47 = 'G', 0x44 = 'D')
+  $name: Hotkey Modifier Combo
+  $description: Select the combination of modifier keys used to activate WinDraw.
+  $options:
+    - 1: Alt
+    - 2: Ctrl
+    - 3: Ctrl + Alt (Default)
+    - 4: Shift
+    - 5: Shift + Alt
+    - 6: Ctrl + Shift
+    - 7: Ctrl + Shift + Alt
+    - 8: Win
+    - 9: Win + Alt
+    - 10: Win + Ctrl
+    - 11: Win + Ctrl + Alt
+
+- hotkeyKey: G
+  $name: Activation Key (A-Z, 0-9)
+  $description: Type a single letter or number for the hotkey (e.g., G, D, P).
+
 - defaultPenWidth: 3.5
-  $name: Default Pen Width
-  $description: Drawing thickness in pixels
+  $name: Default Pen Width (px)
+  $description: Initial drawing thickness for the pen. You can resize this with the mouse wheel while drawing.
+
 - defaultHighlighterWidth: 18.0
-  $name: Default Highlighter Width
-  $description: Highlighter thickness in pixels
+  $name: Default Highlighter Width (px)
+  $description: Initial drawing thickness for the highlighter tool.
+
 - showBottomToolbar: true
-  $name: Show Bottom Toolbar
-  $description: Display floating compact toolbar on the overlay
+  $name: Show Toolbar
+  $description: Display the floating Windows 11 Fluent toolbar on the canvas.
+
 - showTrayIcon: true
   $name: Show System Tray Icon
-  $description: Display a PenWorkspace icon in the Windows taskbar notification area to quickly toggle WinDraw and access quick controls
+  $description: Show the PenWorkspace icon in the taskbar for quick access to settings and toggles.
+
 - cornerRadius: 5
-  $name: Toolbar Corner Radius
-  $description: Corner radius for Windows 11 Fluent look (default 5px)
+  $name: UI Corner Radius
+  $description: Adjust the roundness of the toolbar and menus (0 for square, 5 for Fluent, 8 for rounded).
+
 - autoSaveSnapshot: true
-  $name: Auto-save Snapshot to Pictures/WinDraw
-  $description: Automatically save PNG file in addition to copying to clipboard
+  $name: Auto-Save Snapshots
+  $description: Automatically save your snapshots to your Pictures/WinDraw folder when capturing.
+
 - freezeScreen: false
   $name: Freeze Screen on Activation
-  $description: When enabled, captures a static desktop screenshot so the background is frozen. When disabled (default), the overlay is completely live and transparent so running videos, animations, and apps keep running in real-time.
+  $description: If enabled, taking a snapshot of the background freezes all active videos and animations. If disabled, you draw on a transparent live glass layer.
+
+- customSnapshotPath: ""
+  $name: Custom Snapshot Folder
+  $description: Leave blank to use Default (Pictures/WinDraw). Otherwise, paste a full folder path (e.g., C:\Snips).
+
+- defaultStartupTool: 1
+  $name: Default Startup Tool
+  $description: Choose which tool is active when you first open the overlay.
+  $options:
+    - 1: Pen (Default)
+    - 2: Highlighter
+    - 3: Laser Pointer
+    - 4: Pointer (Click-Through)
+
+- showToastNotifications: true
+  $name: Show Toast Notifications
+  $description: Display brief on-screen popups when taking snapshots or changing modes.
+
+- laserTrailDuration: 800
+  $name: Laser Trail Duration (ms)
+  $description: Time before the laser trail disappears (200ms to 5000ms).
+  $options:
+    - 200: 200 ms (Fastest - Min)
+    - 400: 400 ms (Fast)
+    - 600: 600 ms (Snappy)
+    - 800: 800 ms (Default)
+    - 1200: 1.2 seconds (Medium)
+    - 2000: 2.0 seconds (Long)
+    - 3500: 3.5 seconds (Very Long)
+    - 5000: 5.0 seconds (Persistent - Max)
 */
 // ==/WindhawkModSettings==
 
@@ -114,6 +164,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 #include <shlobj.h>
 #include <shellapi.h>
 #include <vector>
+#include <deque>
 #include <cmath>
 #include <string>
 #include <algorithm>
@@ -143,19 +194,52 @@ struct ModSettings {
     int cornerRadius;
     bool autoSaveSnapshot;
     bool freezeScreen;
+    std::wstring customSnapshotPath;
+    int defaultStartupTool;
+    bool showToastNotifications;
+    int laserTrailDuration;
 } g_settings;
+
+float GetFloatSetting(PCWSTR settingName, float defaultVal) {
+    PCWSTR str = Wh_GetStringSetting(settingName);
+    float val = defaultVal;
+    if (str && str[0] != L'\0') {
+        try { val = std::stof(str); } catch (...) { val = defaultVal; }
+    }
+    Wh_FreeStringSetting(str);
+    return val;
+}
 
 void LoadSettings() {
     g_settings.hotkeyMod = (UINT)Wh_GetIntSetting(L"hotkeyMod");
     if (g_settings.hotkeyMod == 0) g_settings.hotkeyMod = MOD_CONTROL | MOD_ALT;
 
-    g_settings.hotkeyKey = (UINT)Wh_GetIntSetting(L"hotkeyKey");
+    // Parse single-character string (e.g. "G") or legacy virtual key code
+    PCWSTR keyStr = Wh_GetStringSetting(L"hotkeyKey");
+    if (keyStr && keyStr[0] != L'\0') {
+        if (keyStr[0] == L'0' && (keyStr[1] == L'x' || keyStr[1] == L'X')) {
+            g_settings.hotkeyKey = (UINT)wcstoul(keyStr, NULL, 16);
+        } else if (keyStr[0] >= L'0' && keyStr[0] <= L'9' && keyStr[1] >= L'0' && keyStr[1] <= L'9') {
+            g_settings.hotkeyKey = (UINT)wcstoul(keyStr, NULL, 10);
+        } else {
+            SHORT vk = VkKeyScanW(keyStr[0]);
+            if (vk != -1) {
+                g_settings.hotkeyKey = (UINT)(vk & 0xFF);
+            } else {
+                g_settings.hotkeyKey = (UINT)towupper(keyStr[0]);
+            }
+        }
+    } else {
+        g_settings.hotkeyKey = 'G';
+    }
+    Wh_FreeStringSetting(keyStr);
     if (g_settings.hotkeyKey == 0) g_settings.hotkeyKey = 'G';
 
-    g_settings.defaultPenWidth = (float)Wh_GetIntSetting(L"defaultPenWidth");
+    // Safely parse decimals for accurate brush widths
+    g_settings.defaultPenWidth = GetFloatSetting(L"defaultPenWidth", 3.5f);
     if (g_settings.defaultPenWidth <= 0.5f) g_settings.defaultPenWidth = 3.5f;
 
-    g_settings.defaultHighlighterWidth = (float)Wh_GetIntSetting(L"defaultHighlighterWidth");
+    g_settings.defaultHighlighterWidth = GetFloatSetting(L"defaultHighlighterWidth", 18.0f);
     if (g_settings.defaultHighlighterWidth <= 1.0f) g_settings.defaultHighlighterWidth = 18.0f;
 
     g_settings.showBottomToolbar = Wh_GetIntSetting(L"showBottomToolbar") != 0;
@@ -165,6 +249,26 @@ void LoadSettings() {
 
     g_settings.autoSaveSnapshot = Wh_GetIntSetting(L"autoSaveSnapshot") != 0;
     g_settings.freezeScreen = Wh_GetIntSetting(L"freezeScreen") != 0;
+
+    PCWSTR pathStr = Wh_GetStringSetting(L"customSnapshotPath");
+    if (pathStr) {
+        g_settings.customSnapshotPath = pathStr;
+        Wh_FreeStringSetting(pathStr);
+    } else {
+        g_settings.customSnapshotPath = L"";
+    }
+
+    g_settings.defaultStartupTool = Wh_GetIntSetting(L"defaultStartupTool");
+    if (g_settings.defaultStartupTool < 1 || g_settings.defaultStartupTool > 4) {
+        g_settings.defaultStartupTool = 1;
+    }
+
+    g_settings.showToastNotifications = Wh_GetIntSetting(L"showToastNotifications") != 0;
+
+    g_settings.laserTrailDuration = Wh_GetIntSetting(L"laserTrailDuration");
+    if (g_settings.laserTrailDuration < 200 || g_settings.laserTrailDuration > 5000) {
+        g_settings.laserTrailDuration = (g_settings.laserTrailDuration <= 0) ? 800 : std::max(200, std::min(5000, g_settings.laserTrailDuration));
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -185,8 +289,20 @@ enum class ToolMode {
     Highlighter,
     Eraser,
     Pan,
-    Pointer
+    Pointer,
+    Laser
 };
+
+struct LaserPoint {
+    float x;
+    float y;
+    ULONGLONG timestamp;
+};
+struct LaserStroke {
+    std::deque<LaserPoint> points;
+};
+static std::deque<LaserStroke> g_laserStrokes;
+static bool g_isLaserDrawing = false;
 
 enum class GridStyle {
     None = 0,
@@ -369,6 +485,7 @@ static bool g_bIsActive = false;
 static ID2D1Factory* g_pD2DFactory = NULL;
 static ID2D1HwndRenderTarget* g_pRenderTarget = NULL;
 static ID2D1StrokeStyle* g_pRoundStrokeStyle = NULL;
+static ID2D1StrokeStyle* g_pLaserFlatStrokeStyle = NULL;
 static ID2D1SolidColorBrush* g_pStrokeBrush = NULL;
 static ID2D1Bitmap* g_pDesktopBitmap = NULL;
 static IDWriteFactory* g_pDWriteFactory = NULL;
@@ -424,16 +541,17 @@ static float g_eraserRadius = 24.0f;
 // Radial Menu State
 enum class RadialTarget {
     None = -1,
-    Clear = 0,       // 0° (East): Clear All Ink
-    Snapshot = 1,    // 45° (SE): Snapshot
-    Eraser = 2,      // 90° (South): Eraser
-    Undo = 3,        // 135° (SW): Undo
-    Pointer = 4,     // 180° (West): Pointer
-    InkVisible = 5,  // 225° (NW): Ink Visible
-    Pan = 6,         // 270° (North): Pan
-    Draw = 7,        // 315° (NE): Draw
-    Center = 8,      // Center Hub
-    ColorOrb = 9     // Outer orbital colors
+    Clear = 0,       // 0: Clear All Ink
+    Snapshot = 1,    // 1: Snapshot
+    Eraser = 2,      // 2: Eraser
+    Undo = 3,        // 3: Undo
+    Pointer = 4,     // 4: Pointer
+    InkVisible = 5,  // 5: Ink Visible
+    Pan = 6,         // 6: Pan
+    Draw = 7,        // 7: Draw / Pen
+    Laser = 8,       // 8: Laser Pointer
+    Center = 9,      // Center Hub
+    ColorOrb = 10    // Outer orbital colors
 };
 static bool g_radialActive = false;
 static float g_radialX = 0;
@@ -554,6 +672,8 @@ void DrawSnippingOverlay(ID2D1HwndRenderTarget* pRT);
 void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT);
 void RebuildGridBrush();
 void DrawGridFlyout(ID2D1HwndRenderTarget* pRT);
+void DrawLaserTrail(ID2D1HwndRenderTarget* pRT);
+void DrawLaserCursor(ID2D1HwndRenderTarget* pRT);
 
 // ----------------------------------------------------------------------------
 // Utility Math & Geometry
@@ -725,6 +845,19 @@ HRESULT CreateD2DResources(HWND hwnd) {
             );
         }
 
+        if (!g_pLaserFlatStrokeStyle) {
+            g_pD2DFactory->CreateStrokeStyle(
+                D2D1::StrokeStyleProperties(
+                    D2D1_CAP_STYLE_FLAT,
+                    D2D1_CAP_STYLE_FLAT,
+                    D2D1_CAP_STYLE_FLAT,
+                    D2D1_LINE_JOIN_ROUND
+                ),
+                nullptr, 0,
+                &g_pLaserFlatStrokeStyle
+            );
+        }
+
         if (!g_pStrokeBrush) {
             g_pRenderTarget->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1.0f), &g_pStrokeBrush);
         }
@@ -744,6 +877,7 @@ void ReleaseD2DResources() {
     if (g_pStrokeBrush) { g_pStrokeBrush->Release(); g_pStrokeBrush = nullptr; }
     if (g_pDesktopBitmap) { g_pDesktopBitmap->Release(); g_pDesktopBitmap = nullptr; }
     if (g_pRoundStrokeStyle) { g_pRoundStrokeStyle->Release(); g_pRoundStrokeStyle = nullptr; }
+    if (g_pLaserFlatStrokeStyle) { g_pLaserFlatStrokeStyle->Release(); g_pLaserFlatStrokeStyle = nullptr; }
     if (g_pRenderTarget) { g_pRenderTarget->Release(); g_pRenderTarget = nullptr; }
 }
 
@@ -851,10 +985,11 @@ void BuildToolbarLayout(int screenW, int screenH) {
     g_toolbarDividers.push_back(curX + dividerGap * 0.5f);
     curX += dividerGap;
 
-    // Group 3: Navigation Tools (Highlighter, Eraser, Pan, Pointer, Eye, Grid)
-    int toolIds[] = { 1, 2, 3, 4, 5, 6 };
+    // Group 3: Navigation & Presentation Tools (Highlighter, Laser, Eraser, Pan, Pointer, Eye, Grid)
+    int toolIds[] = { 1, 7, 2, 3, 4, 5, 6 };
     const wchar_t* toolLabels[] = {
         L"\uE7E6", // Highlighter (Highlight)
+        L"\uE814", // Laser Pointer
         L"\uE75C", // Eraser (EraseTool)
         L"\uE7C2", // Pan (Move - 4-way arrows)
         L"\uE7C9", // Pointer (TouchPointer)
@@ -863,13 +998,14 @@ void BuildToolbarLayout(int screenW, int screenH) {
     };
     const wchar_t* toolShortcuts[] = {
         L"H",
+        L"W",
         L"E",
         L"P",
         L"M",
         L"V",
         L"G"
     };
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         ToolbarButton btn;
         btn.id = toolIds[i];
         btn.isPen = false;
@@ -1397,6 +1533,7 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
             // Determine active highlight
             bool isToolActive = false;
             if (btn.id == 1 && g_currentTool == ToolMode::Highlighter) isToolActive = true;
+            if (btn.id == 7 && g_currentTool == ToolMode::Laser) isToolActive = true;
             if (btn.id == 2 && g_currentTool == ToolMode::Eraser) isToolActive = true;
             if (btn.id == 3 && g_currentTool == ToolMode::Pan) isToolActive = true;
             if (btn.id == 4 && g_currentTool == ToolMode::Pointer) isToolActive = true;
@@ -1448,6 +1585,21 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                         pRT->DrawLine(D2D1::Point2F(cx - half, cy + off), D2D1::Point2F(cx + half, cy + off), pDrawBrush, 1.25f, g_pRoundStrokeStyle);
                         pRT->DrawLine(D2D1::Point2F(cx - off, cy - half), D2D1::Point2F(cx - off, cy + half), pDrawBrush, 1.25f, g_pRoundStrokeStyle);
                         pRT->DrawLine(D2D1::Point2F(cx + off, cy - half), D2D1::Point2F(cx + off, cy + half), pDrawBrush, 1.25f, g_pRoundStrokeStyle);
+                    }
+                }
+                else if (btn.id == 7) {
+                    // Sleek vector laser beacon: central dot + optic ring + 4 cross ticks
+                    float cx = (btn.rect.left + btn.rect.right) * 0.5f;
+                    float cy = (btn.rect.top + btn.rect.bottom) * 0.5f;
+                    if (pDrawBrush) {
+                        D2D1_ELLIPSE coreEll = D2D1::Ellipse(D2D1::Point2F(cx, cy), 2.2f, 2.2f);
+                        pRT->FillEllipse(coreEll, pDrawBrush);
+                        D2D1_ELLIPSE ringEll = D2D1::Ellipse(D2D1::Point2F(cx, cy), 5.5f, 5.5f);
+                        pRT->DrawEllipse(ringEll, pDrawBrush, 1.2f);
+                        pRT->DrawLine(D2D1::Point2F(cx - 8.0f, cy), D2D1::Point2F(cx - 5.5f, cy), pDrawBrush, 1.2f);
+                        pRT->DrawLine(D2D1::Point2F(cx + 5.5f, cy), D2D1::Point2F(cx + 8.0f, cy), pDrawBrush, 1.2f);
+                        pRT->DrawLine(D2D1::Point2F(cx, cy - 8.0f), D2D1::Point2F(cx, cy - 5.5f), pDrawBrush, 1.2f);
+                        pRT->DrawLine(D2D1::Point2F(cx, cy + 5.5f), D2D1::Point2F(cx, cy + 8.0f), pDrawBrush, 1.2f);
                     }
                 }
                 else {
@@ -1556,6 +1708,8 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
     const float kOuterRingR = 96.0f;
     const float kActionIconR = 70.0f;
     const float kOrbitalRadius = 126.0f;
+    const int kRadialSectorCount = 9;
+    const float kSectorAngle = (float)(2.0 * 3.14159265358979323846 / kRadialSectorCount);
 
     // 1. Draw Action Ring Annulus (between 44px and 96px)
     float ringMidR = (kInnerRingR + kOuterRingR) * 0.5f;
@@ -1564,9 +1718,9 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
     pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), kInnerRingR, kInnerRingR), pBorderBrush, 1.2f);
     pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), kOuterRingR, kOuterRingR), pBorderBrush, 1.2f);
 
-    // 2. Draw 8 Radial Divider Spokes
-    for (int k = 0; k < 8; ++k) {
-        float spokeAngle = (float)(k * (3.14159265358979323846 / 4.0) + 3.14159265358979323846 / 8.0);
+    // 2. Draw 9 Radial Divider Spokes
+    for (int k = 0; k < kRadialSectorCount; ++k) {
+        float spokeAngle = (float)(k * kSectorAngle + kSectorAngle * 0.5f);
         float x1 = cx + std::cos(spokeAngle) * kInnerRingR;
         float y1 = cy + std::sin(spokeAngle) * kInnerRingR;
         float x2 = cx + std::cos(spokeAngle) * kOuterRingR;
@@ -1575,56 +1729,78 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
     }
 
     // 3. Draw Hovered Sector Highlight
-    if (g_radialHoverSector >= 0 && g_radialHoverSector < 8) {
-        bool secDisabled = (g_radialHoverSector == 0 && g_strokes.empty()) ||
-                           (g_radialHoverSector == 3 && g_undoStack.empty());
+    if (g_radialHoverSector >= 0 && g_radialHoverSector < kRadialSectorCount) {
+        bool secDisabled = (g_radialHoverSector == (int)RadialTarget::Clear && g_strokes.empty()) ||
+                           (g_radialHoverSector == (int)RadialTarget::Undo && g_undoStack.empty());
         if (!secDisabled) {
-            float secAngle = (float)(g_radialHoverSector * (3.14159265358979323846 / 4.0));
+            float secAngle = (float)(g_radialHoverSector * kSectorAngle);
             float hx = cx + std::cos(secAngle) * kActionIconR;
             float hy = cy + std::sin(secAngle) * kActionIconR;
-            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 20.0f, 20.0f), pHoverBrush);
-            pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 20.0f, 20.0f), pGlowBrush, 1.5f);
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 18.0f, 18.0f), pHoverBrush);
+            pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(hx, hy), 18.0f, 18.0f), pGlowBrush, 1.5f);
         }
     }
 
-    // 4. Draw the 8 Sector Action Icons
+    // 4. Draw the 9 Sector Action Icons
     const wchar_t* sectorIcons[] = {
-        L"\uE74D", // 0: East (0°) Clear All (Delete)
-        L"\uE722", // 1: SE (45°) Snapshot (Camera)
-        L"\uE75C", // 2: South (90°) Eraser (EraseTool)
-        L"\uE7A7", // 3: SW (135°) Undo
-        L"\uE7C9", // 4: West (180°) Pointer (TouchPointer)
-        g_inkVisible ? L"\uE890" : L"\uED1A", // 5: NW (225°) Ink Visible (View / Hide)
-        L"\uE7C2", // 6: North (270°) Pan (Move - 4-way arrows)
-        L"\uEC87"  // 7: NE (315°) Draw / Pen (Draw)
+        L"\uE74D", // 0: Clear All (Delete)
+        L"\uE722", // 1: Snapshot (Camera)
+        L"\uE75C", // 2: Eraser (EraseTool)
+        L"\uE7A7", // 3: Undo
+        L"\uE7C9", // 4: Pointer (TouchPointer)
+        g_inkVisible ? L"\uE890" : L"\uED1A", // 5: Ink Visible (View / Hide)
+        L"\uE7C2", // 6: Pan (Move - 4-way arrows)
+        L"\uEC87", // 7: Draw / Pen (Draw)
+        L"\uE814"  // 8: Laser Pointer (Beacon)
     };
 
-    for (int k = 0; k < 8; ++k) {
-        float secAngle = (float)(k * (3.14159265358979323846 / 4.0));
+    for (int k = 0; k < kRadialSectorCount; ++k) {
+        float secAngle = (float)(k * kSectorAngle);
         float ix = cx + std::cos(secAngle) * kActionIconR;
         float iy = cy + std::sin(secAngle) * kActionIconR;
 
         bool isSecDisabled = (k == 0 && g_strokes.empty()) ||
                              (k == 3 && g_undoStack.empty());
 
-        D2D1_RECT_F iconRect = D2D1::RectF(ix - 16.0f, iy - 16.0f, ix + 16.0f, iy + 16.0f);
-        if (g_pRadialIconFormat) {
-            ID2D1SolidColorBrush* pIconBrush = nullptr;
-            if (isSecDisabled) {
-                pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.44f, 0.52f, 0.38f), &pIconBrush);
-            }
-            pRT->DrawText(
-                sectorIcons[k], (UINT32)wcslen(sectorIcons[k]),
-                g_pRadialIconFormat,
-                iconRect,
-                pIconBrush ? pIconBrush : pTextBrush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE
+        if (k == 8) {
+            // Draw crisp optic vector laser beacon in Sector 8
+            ID2D1SolidColorBrush* pLaserBrush = nullptr;
+            pRT->CreateSolidColorBrush(
+                (g_currentTool == ToolMode::Laser) ? D2D1::ColorF(0.40f, 0.90f, 0.75f, 1.0f) : D2D1::ColorF(0.92f, 0.95f, 0.98f, 1.00f),
+                &pLaserBrush
             );
-            if (pIconBrush) pIconBrush->Release();
+            if (pLaserBrush) {
+                D2D1_ELLIPSE coreEll = D2D1::Ellipse(D2D1::Point2F(ix, iy), 2.2f, 2.2f);
+                pRT->FillEllipse(coreEll, pLaserBrush);
+                D2D1_ELLIPSE ringEll = D2D1::Ellipse(D2D1::Point2F(ix, iy), 5.5f, 5.5f);
+                pRT->DrawEllipse(ringEll, pLaserBrush, 1.2f);
+                pRT->DrawLine(D2D1::Point2F(ix - 8.0f, iy), D2D1::Point2F(ix - 5.5f, iy), pLaserBrush, 1.2f);
+                pRT->DrawLine(D2D1::Point2F(ix + 5.5f, iy), D2D1::Point2F(ix + 8.0f, iy), pLaserBrush, 1.2f);
+                pRT->DrawLine(D2D1::Point2F(ix, iy - 8.0f), D2D1::Point2F(ix, iy - 5.5f), pLaserBrush, 1.2f);
+                pRT->DrawLine(D2D1::Point2F(ix, iy + 5.5f), D2D1::Point2F(ix, iy + 8.0f), pLaserBrush, 1.2f);
+                pLaserBrush->Release();
+            }
+        }
+        else {
+            D2D1_RECT_F iconRect = D2D1::RectF(ix - 16.0f, iy - 16.0f, ix + 16.0f, iy + 16.0f);
+            if (g_pRadialIconFormat) {
+                ID2D1SolidColorBrush* pIconBrush = nullptr;
+                if (isSecDisabled) {
+                    pRT->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.44f, 0.52f, 0.38f), &pIconBrush);
+                }
+                pRT->DrawText(
+                    sectorIcons[k], (UINT32)wcslen(sectorIcons[k]),
+                    g_pRadialIconFormat,
+                    iconRect,
+                    pIconBrush ? pIconBrush : pTextBrush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE
+                );
+                if (pIconBrush) pIconBrush->Release();
+            }
         }
     }
 
-    // 5. Center Hub: Active Swatch & Pen/Highlighter Toggle
+    // 5. Center Hub: Active Swatch & Pen/Highlighter/Laser Toggle
     bool centerHovered = (g_radialHoverTarget == RadialTarget::Center);
     if (centerHovered) {
         pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), kCenterRadius + 3.0f, kCenterRadius + 3.0f), pGlowBrush);
@@ -1640,7 +1816,7 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
         pActiveBrush->Release();
     }
 
-    const wchar_t* centerBadge = (g_currentTool == ToolMode::Highlighter) ? L"\uE7E6" : L"\uEC87";
+    const wchar_t* centerBadge = (g_currentTool == ToolMode::Highlighter) ? L"\uE7E6" : (g_currentTool == ToolMode::Laser ? L"\uE814" : L"\uEC87");
     if (g_pCenterBadgeFormat) {
         D2D1_RECT_F centerTextRect = D2D1::RectF(cx - 14.0f, cy - 14.0f, cx + 14.0f, cy + 14.0f);
         ID2D1SolidColorBrush* pWhite = nullptr;
@@ -1877,6 +2053,7 @@ void DrawSnippingOverlay(ID2D1HwndRenderTarget* pRT) {
 }
 
 void DrawToast(ID2D1HwndRenderTarget* pRT, int screenW, int screenH) {
+    if (!g_settings.showToastNotifications) return;
     if (g_toastStartTime == 0) return;
     ULONGLONG elapsed = GetTickCount64() - g_toastStartTime;
     if (elapsed > 2000) {
@@ -2387,6 +2564,147 @@ void DrawGridFlyout(ID2D1HwndRenderTarget* pRT) {
     if (pBgBrush) pBgBrush->Release();
 }
 
+void DrawLaserTrail(ID2D1HwndRenderTarget* pRT) {
+    if (g_laserStrokes.empty()) return;
+    ULONGLONG now = GetTickCount64();
+    ULONGLONG duration = (ULONGLONG)std::max(200, g_settings.laserTrailDuration);
+
+    ID2D1SolidColorBrush* pGlowBrush = nullptr;
+    ID2D1SolidColorBrush* pCoreBrush = nullptr;
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.08f, 0.22f, 1.0f), &pGlowBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.92f, 0.95f, 1.0f), &pCoreBrush);
+
+    if (!pGlowBrush || !pCoreBrush) {
+        if (pGlowBrush) pGlowBrush->Release();
+        if (pCoreBrush) pCoreBrush->Release();
+        return;
+    }
+
+    // Process and draw each stroke independently so disconnected strokes NEVER link together
+    for (const auto& stroke : g_laserStrokes) {
+        if (stroke.points.empty()) continue;
+
+        size_t count = stroke.points.size();
+        if (count == 1) {
+            // Single tap / dot: render as a glowing neon laser bead
+            const auto& pt = stroke.points[0];
+            ULONGLONG age = (now >= pt.timestamp) ? (now - pt.timestamp) : 0;
+            if (age < duration) {
+                float life = 1.0f - (float)age / (float)duration;
+                if (life > 0.01f) {
+                    pGlowBrush->SetOpacity(0.50f * life);
+                    pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(pt.x, pt.y), 5.0f * life, 5.0f * life), pGlowBrush);
+                    pCoreBrush->SetOpacity(0.95f * life);
+                    pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(pt.x, pt.y), 2.2f * life, 2.2f * life), pCoreBrush);
+                }
+            }
+        }
+        else {
+            // Continuous stroke: compute overall life from newest point
+            ULONGLONG newestAge = (now >= stroke.points.back().timestamp) ? (now - stroke.points.back().timestamp) : 0;
+            float strokeLife = 1.0f;
+            if (newestAge > 0 && newestAge < duration) {
+                strokeLife = 1.0f - (float)newestAge / (float)duration;
+            } else if (newestAge >= duration) {
+                continue;
+            }
+
+            ID2D1PathGeometry* pGeom = nullptr;
+            if (g_pD2DFactory && SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pGeom))) {
+                ID2D1GeometrySink* pSink = nullptr;
+                if (SUCCEEDED(pGeom->Open(&pSink))) {
+                    pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
+                    pSink->BeginFigure(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+
+                    if (count == 2) {
+                        pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
+                    }
+                    else {
+                        // Smooth Quadratic Bézier spline through midpoints (seamless, zero dots)
+                        for (size_t k = 0; k + 1 < count; ++k) {
+                            D2D1_POINT_2F midPoint = D2D1::Point2F(
+                                (stroke.points[k].x + stroke.points[k + 1].x) * 0.5f,
+                                (stroke.points[k].y + stroke.points[k + 1].y) * 0.5f
+                            );
+                            pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                                D2D1::Point2F(stroke.points[k].x, stroke.points[k].y),
+                                midPoint
+                            ));
+                        }
+                        pSink->AddLine(D2D1::Point2F(stroke.points[count - 1].x, stroke.points[count - 1].y));
+                    }
+
+                    pSink->EndFigure(D2D1_FIGURE_END_OPEN);
+                    pSink->Close();
+                    pSink->Release();
+
+                    // Outer Vibrant Neon Glow
+                    pGlowBrush->SetOpacity(0.52f * strokeLife);
+                    pRT->DrawGeometry(pGeom, pGlowBrush, 6.5f, g_pRoundStrokeStyle);
+
+                    // Hot Inner Laser Beam Core
+                    pCoreBrush->SetOpacity(0.95f * strokeLife);
+                    pRT->DrawGeometry(pGeom, pCoreBrush, 2.5f, g_pRoundStrokeStyle);
+                }
+                pGeom->Release();
+            }
+        }
+    }
+
+    pGlowBrush->Release();
+    pCoreBrush->Release();
+}
+
+void DrawLaserCursor(ID2D1HwndRenderTarget* pRT) {
+    if (g_currentTool != ToolMode::Laser) return;
+    if (g_isSnipping) return;
+    if (g_isLaserDrawing) return; // Suppress cursor bead during active laser trail drawing to prevent dot stacking
+
+    // Do not draw laser bead over toolbar or flyouts
+    if (g_shapesFlyoutOpen &&
+        g_cursorX >= g_shapesFlyoutRect.left && g_cursorX <= g_shapesFlyoutRect.right &&
+        g_cursorY >= g_shapesFlyoutRect.top && g_cursorY <= g_shapesFlyoutRect.bottom) {
+        return;
+    }
+    if (g_gridFlyoutOpen &&
+        g_cursorX >= g_gridFlyoutRect.left && g_cursorX <= g_gridFlyoutRect.right &&
+        g_cursorY >= g_gridFlyoutRect.top && g_cursorY <= g_gridFlyoutRect.bottom) {
+        return;
+    }
+    if (g_settings.showBottomToolbar &&
+        g_cursorX >= (g_toolbarRect.left - 4.0f) && g_cursorX <= (g_toolbarRect.right + 4.0f) &&
+        g_cursorY >= (g_toolbarRect.top - 4.0f) && g_cursorY <= (g_toolbarRect.bottom + 4.0f)) {
+        return;
+    }
+
+    // 3-Tier Neon Glow Laser Pointer Bead
+    ID2D1SolidColorBrush* pHaloBrush = nullptr;
+    ID2D1SolidColorBrush* pCoreBrush = nullptr;
+    ID2D1SolidColorBrush* pSparkBrush = nullptr;
+
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.05f, 0.20f, 0.35f), &pHaloBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.15f, 0.25f, 0.90f), &pCoreBrush);
+    pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.95f, 0.98f, 1.00f), &pSparkBrush);
+
+    D2D1_POINT_2F pt = D2D1::Point2F(g_cursorX, g_cursorY);
+
+    if (pHaloBrush) {
+        // Broad outer neon aura
+        pRT->FillEllipse(D2D1::Ellipse(pt, 9.0f, 9.0f), pHaloBrush);
+        pHaloBrush->Release();
+    }
+    if (pCoreBrush) {
+        // Vivid crimson core
+        pRT->FillEllipse(D2D1::Ellipse(pt, 4.5f, 4.5f), pCoreBrush);
+        pCoreBrush->Release();
+    }
+    if (pSparkBrush) {
+        // High-intensity white laser center spark
+        pRT->FillEllipse(D2D1::Ellipse(pt, 2.0f, 2.0f), pSparkBrush);
+        pSparkBrush->Release();
+    }
+}
+
 void RenderOverlay() {
     if (!g_pRenderTarget) return;
 
@@ -2427,6 +2745,9 @@ void RenderOverlay() {
         DrawSmoothStroke(g_pRenderTarget, g_currentStroke);
     }
 
+    // 3b. Vanishing Ephemeral Laser Trail
+    DrawLaserTrail(g_pRenderTarget);
+
     // Reset transform for HUD & Toolbar
     g_pRenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
 
@@ -2437,8 +2758,9 @@ void RenderOverlay() {
         DrawSnippingOverlay(g_pRenderTarget);
     }
     else {
-        // 4. Eraser cursor, Pen size bubble & Zoom badge
+        // 4. Eraser cursor, Laser bead cursor, Pen size bubble & Zoom badge
         DrawEraserCursor(g_pRenderTarget);
+        DrawLaserCursor(g_pRenderTarget);
         DrawPenSizePreview(g_pRenderTarget);
         DrawZoomPreview(g_pRenderTarget);
 
@@ -2796,23 +3118,38 @@ void SaveCroppedSnapshot(int left, int top, int width, int height) {
     // Auto-save PNG if enabled (with millisecond timestamp & overwrite prevention)
     bool savedToFile = false;
     if (g_settings.autoSaveSnapshot) {
-        wchar_t picturesPath[MAX_PATH];
-        if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
-            std::wstring winDrawDir = std::wstring(picturesPath) + L"\\WinDraw";
-            CreateDirectoryW(winDrawDir.c_str(), NULL);
+        std::wstring targetDir = L"";
+        if (!g_settings.customSnapshotPath.empty()) {
+            DWORD attribs = GetFileAttributesW(g_settings.customSnapshotPath.c_str());
+            if (attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY)) {
+                targetDir = g_settings.customSnapshotPath;
+            } else {
+                if (CreateDirectoryW(g_settings.customSnapshotPath.c_str(), NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
+                    targetDir = g_settings.customSnapshotPath;
+                }
+            }
+        }
+        if (targetDir.empty()) {
+            wchar_t picturesPath[MAX_PATH];
+            if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
+                targetDir = std::wstring(picturesPath) + L"\\WinDraw";
+                CreateDirectoryW(targetDir.c_str(), NULL);
+            }
+        }
 
+        if (!targetDir.empty()) {
             SYSTEMTIME st;
             GetLocalTime(&st);
             wchar_t filename[128];
             wsprintfW(filename, L"\\WinDraw_%04d-%02d-%02d_%02d%02d%02d_%03d.png",
                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 
-            std::wstring fullPath = winDrawDir + filename;
+            std::wstring fullPath = targetDir + filename;
             int counter = 1;
             while (GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES && counter < 100) {
                 wsprintfW(filename, L"\\WinDraw_%04d-%02d-%02d_%02d%02d%02d_%03d_%d.png",
                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, counter++);
-                fullPath = winDrawDir + filename;
+                fullPath = targetDir + filename;
             }
 
             SaveBitmapToPNG(hCroppedBmp, fullPath);
@@ -2858,18 +3195,19 @@ void SaveCroppedSnapshot(int left, int top, int width, int height) {
         DeleteObject(hCroppedBmp);
     }
 
-    if (clipboardSucceeded && savedToFile) {
-        g_toastMessage = L"Snapshot saved to Pictures & Clipboard";
-    } else if (clipboardSucceeded) {
-        g_toastMessage = L"Snapshot copied to Clipboard";
-    } else if (savedToFile) {
-        g_toastMessage = L"Snapshot saved to Pictures/WinDraw";
-    } else {
-        g_toastMessage = L"Snapshot capture failed";
+    if (g_settings.showToastNotifications) {
+        if (clipboardSucceeded && savedToFile) {
+            g_toastMessage = L"Snapshot saved to Folder & Clipboard";
+        } else if (clipboardSucceeded) {
+            g_toastMessage = L"Snapshot copied to Clipboard";
+        } else if (savedToFile) {
+            g_toastMessage = L"Snapshot saved to Folder";
+        } else {
+            g_toastMessage = L"Snapshot capture failed";
+        }
+        g_toastStartTime = GetTickCount64();
+        if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, 1, 30, NULL);
     }
-
-    g_toastStartTime = GetTickCount64();
-    if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, 1, 30, NULL);
 
     DeleteDC(hDstDC);
     DeleteDC(hSrcDC);
@@ -2892,9 +3230,11 @@ void SetToolMode(ToolMode newMode) {
             SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             SetTimer(g_hOverlayWnd, 2, 20, NULL);
 
-            g_toastMessage = L"Pointer Mode: Click-through active";
-            g_toastStartTime = GetTickCount64();
-            SetTimer(g_hOverlayWnd, 1, 30, NULL);
+            if (g_settings.showToastNotifications) {
+                g_toastMessage = L"Pointer Mode: Click-through active";
+                g_toastStartTime = GetTickCount64();
+                SetTimer(g_hOverlayWnd, 1, 30, NULL);
+            }
         }
         else if (oldMode == ToolMode::Pointer) {
             // Exit Pointer mode:
@@ -2903,10 +3243,17 @@ void SetToolMode(ToolMode newMode) {
             SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
             SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
-            g_toastMessage = L"Drawing Mode active";
-            g_toastStartTime = GetTickCount64();
-            SetTimer(g_hOverlayWnd, 1, 30, NULL);
+            if (g_settings.showToastNotifications) {
+                g_toastMessage = L"Drawing Mode active";
+                g_toastStartTime = GetTickCount64();
+                SetTimer(g_hOverlayWnd, 1, 30, NULL);
+            }
         }
+
+        if (oldMode == ToolMode::Laser) {
+            g_isLaserDrawing = false;
+        }
+
         InvalidateOverlay();
     }
 }
@@ -3009,6 +3356,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        // Laser Mode: Scroll wheel adjusts laser trail duration between 200ms (min) and 5000ms (max)!
+        if (g_currentTool == ToolMode::Laser) {
+            int stepMs = (delta > 0) ? 100 : -100;
+            g_settings.laserTrailDuration = std::max(200, std::min(5000, g_settings.laserTrailDuration + stepMs));
+            if (g_settings.showToastNotifications) {
+                wchar_t buf[64];
+                wsprintfW(buf, L"Laser Trail: %d ms (Min: 200ms, Max: 5000ms)", g_settings.laserTrailDuration);
+                g_toastMessage = buf;
+                g_toastStartTime = GetTickCount64();
+            }
+            SetTimer(hwnd, 1, 30, NULL);
+            InvalidateOverlay();
+            return 0;
+        }
+
         if (g_currentTool == ToolMode::Highlighter) {
             g_settings.defaultHighlighterWidth = std::max(4.0f, std::min(80.0f, g_settings.defaultHighlighterWidth + step * 2.0f));
             g_currentPenWidth = g_settings.defaultHighlighterWidth;
@@ -3045,6 +3407,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (now - g_toastStartTime > 2000) {
                     g_toastStartTime = 0;
                 } else {
+                    needTimer = true;
+                }
+            }
+            if (!g_laserStrokes.empty() || g_isLaserDrawing) {
+                ULONGLONG duration = (ULONGLONG)std::max(200, g_settings.laserTrailDuration);
+                for (auto it = g_laserStrokes.begin(); it != g_laserStrokes.end(); ) {
+                    while (!it->points.empty() && (now - it->points.front().timestamp > duration)) {
+                        it->points.pop_front();
+                    }
+                    if (it->points.empty()) {
+                        it = g_laserStrokes.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (!g_laserStrokes.empty() || g_isLaserDrawing) {
                     needTimer = true;
                 }
             }
@@ -3194,6 +3572,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             InvalidateOverlay();
             return 0;
         }
+        if (wParam == 'W') { SetToolMode((g_currentTool == ToolMode::Laser) ? ToolMode::Pen : ToolMode::Laser); return 0; }
         if (wParam == 'E') { SetToolMode(ToolMode::Eraser); return 0; }
         if (wParam == 'P') { SetToolMode((g_currentTool == ToolMode::Pan) ? ToolMode::Pen : ToolMode::Pan); return 0; }
         if (wParam == 'M') { SetToolMode((g_currentTool == ToolMode::Pointer) ? ToolMode::Pen : ToolMode::Pointer); return 0; }
@@ -3220,6 +3599,18 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == VK_OEM_4) { // '['
+            if (g_currentTool == ToolMode::Laser) {
+                g_settings.laserTrailDuration = std::max(200, g_settings.laserTrailDuration - 100);
+                if (g_settings.showToastNotifications) {
+                    wchar_t buf[64];
+                    wsprintfW(buf, L"Laser Trail: %d ms (Min: 200ms, Max: 5000ms)", g_settings.laserTrailDuration);
+                    g_toastMessage = buf;
+                    g_toastStartTime = GetTickCount64();
+                }
+                SetTimer(hwnd, 1, 30, NULL);
+                InvalidateOverlay();
+                return 0;
+            }
             g_settings.defaultPenWidth = std::max(1.0f, g_settings.defaultPenWidth - 1.0f);
             g_currentPenWidth = g_settings.defaultPenWidth;
             g_sizePreviewTime = GetTickCount64();
@@ -3227,6 +3618,18 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == VK_OEM_6) { // ']'
+            if (g_currentTool == ToolMode::Laser) {
+                g_settings.laserTrailDuration = std::min(5000, g_settings.laserTrailDuration + 100);
+                if (g_settings.showToastNotifications) {
+                    wchar_t buf[64];
+                    wsprintfW(buf, L"Laser Trail: %d ms (Min: 200ms, Max: 5000ms)", g_settings.laserTrailDuration);
+                    g_toastMessage = buf;
+                    g_toastStartTime = GetTickCount64();
+                }
+                SetTimer(hwnd, 1, 30, NULL);
+                InvalidateOverlay();
+                return 0;
+            }
             g_settings.defaultPenWidth = std::min(60.0f, g_settings.defaultPenWidth + 1.0f);
             g_currentPenWidth = g_settings.defaultPenWidth;
             g_sizePreviewTime = GetTickCount64();
@@ -3282,8 +3685,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             else if (dist >= 44.0f && dist <= 102.0f) {
                 float angle = std::atan2(dy, dx);
-                if (angle < 0) angle += 2.0f * 3.14159265f;
-                int sector = (int)((angle + 3.14159265f / 8.0f) / (3.14159265f / 4.0f)) % 8;
+                if (angle < 0) angle += 2.0f * 3.14159265358979323846f;
+                const float kSecStep = (float)(2.0 * 3.14159265358979323846 / 9.0);
+                int sector = (int)((angle + kSecStep * 0.5f) / kSecStep) % 9;
                 bool sectorDisabled = (sector == (int)RadialTarget::Clear && g_strokes.empty()) ||
                                       (sector == (int)RadialTarget::Undo && g_undoStack.empty());
                 if (!sectorDisabled) {
@@ -3455,6 +3859,39 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        // Active Laser Pointer & Ephemeral Trail
+        if (g_currentTool == ToolMode::Laser) {
+            if (g_isLaserDrawing) {
+                float adjX = (g_cursorX - g_panOffsetX) / g_zoomScale;
+                float adjY = (g_cursorY - g_panOffsetY) / g_zoomScale;
+                if (g_laserStrokes.empty()) {
+                    g_laserStrokes.emplace_back();
+                    g_laserStrokes.back().points.push_back({ adjX, adjY, GetTickCount64() });
+                } else {
+                    auto& pts = g_laserStrokes.back().points;
+                    if (!pts.empty()) {
+                        float dSq = DistanceSq(adjX, adjY, pts.back().x, pts.back().y);
+                        // Filter micro-movements to eliminate point clustering (which causes dotted artifacts)
+                        if (dSq >= 9.0f) { // >= 3px
+                            // Subdivide large jumps to ensure buttery-smooth curves
+                            if (dSq > 144.0f) { // > 12px
+                                float midX = (pts.back().x + adjX) * 0.5f;
+                                float midY = (pts.back().y + adjY) * 0.5f;
+                                ULONGLONG midT = (pts.back().timestamp + GetTickCount64()) / 2;
+                                pts.push_back({ midX, midY, midT });
+                            }
+                            pts.push_back({ adjX, adjY, GetTickCount64() });
+                            SetTimer(hwnd, 1, 16, NULL);
+                        }
+                    } else {
+                        pts.push_back({ adjX, adjY, GetTickCount64() });
+                    }
+                }
+            }
+            InvalidateOverlay();
+            return 0;
+        }
+
         // When Eraser mode is active or right-click is held down, red circle follows mouse smoothly!
         if (g_currentTool == ToolMode::Eraser || g_isRightMouseDown) {
             InvalidateOverlay();
@@ -3488,8 +3925,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Radial Menu selection
         if (g_radialActive) {
             if (g_radialHoverTarget == RadialTarget::Center) {
-                // Toggle between Pen and Highlighter
-                g_currentTool = (g_currentTool == ToolMode::Highlighter) ? ToolMode::Pen : ToolMode::Highlighter;
+                // Cycle between Pen, Highlighter, and Laser
+                if (g_currentTool == ToolMode::Pen) {
+                    SetToolMode(ToolMode::Highlighter);
+                } else if (g_currentTool == ToolMode::Highlighter) {
+                    SetToolMode(ToolMode::Laser);
+                } else {
+                    SetToolMode(ToolMode::Pen);
+                }
             }
             else if (g_radialHoverTarget == RadialTarget::Clear) {
                 if (!g_strokes.empty()) {
@@ -3522,6 +3965,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             else if (g_radialHoverTarget == RadialTarget::Draw) {
                 SetToolMode(ToolMode::Pen);
+            }
+            else if (g_radialHoverTarget == RadialTarget::Laser) {
+                SetToolMode(ToolMode::Laser);
             }
             else if (g_radialHoverTarget == RadialTarget::ColorOrb && g_hoveredOrb >= 0 && g_hoveredOrb < (int)kPresetColorCount) {
                 g_activeColor = kPresetColors[g_hoveredOrb];
@@ -3710,6 +4156,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     SetToolMode((g_currentTool == ToolMode::Highlighter) ? ToolMode::Pen : ToolMode::Highlighter);
                     SetForegroundWindow(hwnd);
                     break;
+                case 7: // Laser Pointer
+                    g_shapesFlyoutOpen = false;
+                    g_gridFlyoutOpen = false;
+                    SetToolMode((g_currentTool == ToolMode::Laser) ? ToolMode::Pen : ToolMode::Laser);
+                    SetForegroundWindow(hwnd);
+                    break;
                 case 2: // Eraser
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
@@ -3805,6 +4257,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        // Laser Tool Left-Click: start ephemeral trail drawing
+        if (g_currentTool == ToolMode::Laser) {
+            SetCapture(hwnd);
+            g_isLaserDrawing = true;
+            float adjX = (x - g_panOffsetX) / g_zoomScale;
+            float adjY = (y - g_panOffsetY) / g_zoomScale;
+            g_laserStrokes.emplace_back();
+            g_laserStrokes.back().points.push_back({ adjX, adjY, GetTickCount64() });
+            SetTimer(hwnd, 1, 16, NULL);
+            InvalidateOverlay();
+            return 0;
+        }
+
         // Eraser Tool Left-Click: start Brush Erase Drag
         if (g_currentTool == ToolMode::Eraser) {
             g_hasPushedUndoForCurrentErase = false;
@@ -3851,6 +4316,20 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     InvalidateOverlay();
                 }
             }
+            return 0;
+        }
+
+        if (g_isLaserDrawing) {
+            ReleaseCapture();
+            g_isLaserDrawing = false;
+            float adjX = ((float)GET_X_LPARAM(lParam) - g_panOffsetX) / g_zoomScale;
+            float adjY = ((float)GET_Y_LPARAM(lParam) - g_panOffsetY) / g_zoomScale;
+            if (!g_laserStrokes.empty() && !g_laserStrokes.back().points.empty()) {
+                if (DistanceSq(adjX, adjY, g_laserStrokes.back().points.back().x, g_laserStrokes.back().points.back().y) >= 4.0f) {
+                    g_laserStrokes.back().points.push_back({ adjX, adjY, GetTickCount64() });
+                }
+            }
+            InvalidateOverlay();
             return 0;
         }
 
@@ -4011,6 +4490,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 return TRUE;
             }
+            if (g_currentTool == ToolMode::Laser) {
+                SetCursor(NULL);
+                return TRUE;
+            }
             SetCursor(LoadCursor(NULL, IDC_CROSS));
             return TRUE;
         }
@@ -4090,7 +4573,13 @@ void ShowOverlay() {
     SetForegroundWindow(g_hOverlayWnd);
     SetFocus(g_hOverlayWnd);
     g_bIsActive = true;
-    SetToolMode(ToolMode::Pen);
+    switch (g_settings.defaultStartupTool) {
+        case 2: SetToolMode(ToolMode::Highlighter); break;
+        case 3: SetToolMode(ToolMode::Laser); break;
+        case 4: SetToolMode(ToolMode::Pointer); break;
+        case 1:
+        default: SetToolMode(ToolMode::Pen); break;
+    }
 
     InvalidateOverlay();
 }
@@ -4124,6 +4613,8 @@ void HideOverlay() {
     }
     g_zoomPreviewTime = 0;
     g_sizePreviewTime = 0;
+    g_laserStrokes.clear();
+    g_isLaserDrawing = false;
     g_currentTool = ToolMode::Pen;
 }
 

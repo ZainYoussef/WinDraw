@@ -86,6 +86,9 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 - autoSaveSnapshot: true
   $name: Auto-save Snapshot to Pictures/WinDraw
   $description: Automatically save PNG file in addition to copying to clipboard
+- freezeScreen: false
+  $name: Freeze Screen on Activation
+  $description: When enabled, captures a static desktop screenshot so the background is frozen. When disabled (default), the overlay is completely live and transparent so running videos, animations, and apps keep running in real-time.
 */
 // ==/WindhawkModSettings==
 
@@ -131,6 +134,7 @@ struct ModSettings {
     bool showBottomToolbar;
     int cornerRadius;
     bool autoSaveSnapshot;
+    bool freezeScreen;
 } g_settings;
 
 void LoadSettings() {
@@ -151,6 +155,7 @@ void LoadSettings() {
     if (g_settings.cornerRadius <= 0) g_settings.cornerRadius = 5;
 
     g_settings.autoSaveSnapshot = Wh_GetIntSetting(L"autoSaveSnapshot") != 0;
+    g_settings.freezeScreen = Wh_GetIntSetting(L"freezeScreen") != 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -338,6 +343,13 @@ static float DistToSegmentSq(float px, float py, float x1, float y1, float x2, f
 // ----------------------------------------------------------------------------
 
 void CaptureDesktop() {
+    if (!g_settings.freezeScreen) {
+        if (g_pDesktopBitmap) {
+            g_pDesktopBitmap->Release();
+            g_pDesktopBitmap = nullptr;
+        }
+        return;
+    }
     if (!g_pRenderTarget) return;
 
     if (g_pDesktopBitmap) {
@@ -1048,8 +1060,8 @@ void RenderOverlay() {
     g_pRenderTarget->BeginDraw();
     g_pRenderTarget->Clear(D2D1::ColorF(0, 0, 0, 0));
 
-    // 1. Draw desktop backdrop (only when not in click-through pointer mode)
-    if (g_pDesktopBitmap && g_currentTool != ToolMode::Pointer) {
+    // 1. Draw desktop backdrop (only when freezeScreen setting is enabled and not in click-through pointer mode)
+    if (g_settings.freezeScreen && g_pDesktopBitmap && g_currentTool != ToolMode::Pointer) {
         D2D1_SIZE_F size = g_pRenderTarget->GetSize();
         g_pRenderTarget->DrawBitmap(
             g_pDesktopBitmap,
@@ -1197,12 +1209,12 @@ void CopySnapshotToClipboard() {
     int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
-    HDC hScreenDC = GetDC(g_hOverlayWnd);
+    HDC hScreenDC = GetDC(NULL);
     HDC hMemDC = CreateCompatibleDC(hScreenDC);
     HBITMAP hBitmap = CreateCompatibleBitmap(hScreenDC, vw, vh);
     HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, hBitmap);
 
-    BitBlt(hMemDC, 0, 0, vw, vh, hScreenDC, 0, 0, SRCCOPY);
+    BitBlt(hMemDC, 0, 0, vw, vh, hScreenDC, vx, vy, SRCCOPY | CAPTUREBLT);
 
     // Save to Clipboard
     if (OpenClipboard(g_hOverlayWnd)) {
@@ -1235,7 +1247,7 @@ void CopySnapshotToClipboard() {
 
     SelectObject(hMemDC, hOldBmp);
     DeleteDC(hMemDC);
-    ReleaseDC(g_hOverlayWnd, hScreenDC);
+    ReleaseDC(NULL, hScreenDC);
 
     g_toastStartTime = GetTickCount64();
     InvalidateOverlay();

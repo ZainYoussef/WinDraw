@@ -111,6 +111,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **M** | Pointer (Click-Through) Mode |
 | **G** | Toggle Grid Overlay Flyout |
 | **B** | Collapse / Expand Toolbar Pill |
+| **Ctrl + Shift + B** | Reset Toolbar Position to Primary Screen Center |
 | **V** | Toggle Ink Visibility (Show/Hide) |
 | **C** | Clear All Drawings |
 | **Ctrl + Z** | Undo last stroke |
@@ -1188,8 +1189,139 @@ void PerformRedo() {
 }
 
 // ----------------------------------------------------------------------------
-// Layout Setup: Compact Windows 11 Bottom Toolbar
+// Layout Setup: Compact Windows 11 Bottom Toolbar & Multi-Monitor Clamping
 // ----------------------------------------------------------------------------
+
+struct MonitorBounds {
+    float left;
+    float top;
+    float right;
+    float bottom;
+};
+
+inline void GetMonitorBoundsAt(float clientX, float clientY, float& outLeft, float& outTop, float& outRight, float& outBottom) {
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    POINT pt = { (LONG)std::round(clientX + (float)vx), (LONG)std::round(clientY + (float)vy) };
+    HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(MONITORINFO) };
+    if (hMon && GetMonitorInfo(hMon, &mi)) {
+        outLeft   = (float)(mi.rcMonitor.left - vx);
+        outTop    = (float)(mi.rcMonitor.top - vy);
+        outRight  = (float)(mi.rcMonitor.right - vx);
+        outBottom = (float)(mi.rcMonitor.bottom - vy);
+    } else {
+        outLeft   = 0.0f;
+        outTop    = 0.0f;
+        outRight  = (float)GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        outBottom = (float)GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    }
+}
+
+inline void ClampToolbarToScreen(float& x, float& y, float w, float h, float kPad = 6.0f) {
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+    struct EnumCtx {
+        int vx;
+        int vy;
+        std::vector<MonitorBounds> mons;
+    } ctx;
+    ctx.vx = vx;
+    ctx.vy = vy;
+
+    EnumDisplayMonitors(NULL, NULL, [](HMONITOR, HDC, LPRECT lprc, LPARAM dwData) -> BOOL {
+        EnumCtx* pCtx = reinterpret_cast<EnumCtx*>(dwData);
+        if (lprc && pCtx) {
+            MonitorBounds mb;
+            mb.left = (float)(lprc->left - pCtx->vx);
+            mb.top = (float)(lprc->top - pCtx->vy);
+            mb.right = (float)(lprc->right - pCtx->vx);
+            mb.bottom = (float)(lprc->bottom - pCtx->vy);
+            pCtx->mons.push_back(mb);
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+
+    if (ctx.mons.empty()) {
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        float maxX = std::max(kPad, (float)vw - w - kPad);
+        float maxY = std::max(kPad, (float)vh - h - kPad);
+        x = std::max(kPad, std::min(maxX, x));
+        y = std::max(kPad, std::min(maxY, y));
+        return;
+    }
+
+    // 1. Overall horizontal span across all monitors
+    float minAllX = ctx.mons[0].left;
+    float maxAllX = ctx.mons[0].right;
+    for (const auto& m : ctx.mons) {
+        if (m.left < minAllX) minAllX = m.left;
+        if (m.right > maxAllX) maxAllX = m.right;
+    }
+    float boundMinX = minAllX + kPad;
+    float boundMaxX = std::max(boundMinX, maxAllX - w - kPad);
+    x = std::max(boundMinX, std::min(boundMaxX, x));
+
+    // 2. Find all monitors that intersect the horizontal span [x, x + w]
+    std::vector<MonitorBounds> intersecting;
+    for (const auto& m : ctx.mons) {
+        if (m.left < (x + w) && m.right > x) {
+            intersecting.push_back(m);
+        }
+    }
+
+    if (intersecting.empty()) {
+        float centerX = x + w * 0.5f;
+        float bestDist = 1e9f;
+        size_t bestIdx = 0;
+        for (size_t i = 0; i < ctx.mons.size(); ++i) {
+            float monCenter = (ctx.mons[i].left + ctx.mons[i].right) * 0.5f;
+            float d = std::abs(monCenter - centerX);
+            if (d < bestDist) {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+        intersecting.push_back(ctx.mons[bestIdx]);
+    }
+
+    // 3. Constrain Y so that every part overlapping an intersecting monitor is strictly on-screen
+    float allowableMinY = intersecting[0].top;
+    float allowableMaxY = intersecting[0].bottom;
+    for (const auto& m : intersecting) {
+        if (m.top > allowableMinY) allowableMinY = m.top;
+        if (m.bottom < allowableMaxY) allowableMaxY = m.bottom;
+    }
+
+    float minY = allowableMinY + kPad;
+    float maxY = allowableMaxY - h - kPad;
+
+    if (minY > maxY) {
+        // Toolbar is in a transition step between monitors where vertical ranges do not overlap.
+        // Snap x to the monitor containing the majority of the toolbar.
+        float centerX = x + w * 0.5f;
+        float bestDist = 1e9f;
+        size_t bestIdx = 0;
+        for (size_t i = 0; i < ctx.mons.size(); ++i) {
+            float monCenter = (ctx.mons[i].left + ctx.mons[i].right) * 0.5f;
+            float d = std::abs(monCenter - centerX);
+            if (d < bestDist) {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+        const auto& bestMon = ctx.mons[bestIdx];
+        float bMinX = bestMon.left + kPad;
+        float bMaxX = std::max(bMinX, bestMon.right - w - kPad);
+        x = std::max(bMinX, std::min(bMaxX, x));
+        minY = bestMon.top + kPad;
+        maxY = std::max(minY, bestMon.bottom - h - kPad);
+    }
+
+    y = std::max(minY, std::min(maxY, y));
+}
 
 void BuildToolbarLayout(int screenW, int screenH) {
     g_toolbarButtons.clear();
@@ -1229,6 +1361,13 @@ void BuildToolbarLayout(int screenW, int screenH) {
                 if (startX < 0.0f) startX = (screenW - pillW) * 0.5f;
                 if (startY < 0.0f) startY = (screenH - pillH - 24.0f);
             }
+        }
+
+        ClampToolbarToScreen(startX, startY, pillW, pillH, 6.0f);
+        if (startX != g_toolbarCustomX || startY != g_toolbarCustomY) {
+            g_toolbarCustomX = startX;
+            g_toolbarCustomY = startY;
+            SavePersistentToolbarState();
         }
 
         g_toolbarRect = D2D1::RectF(startX, startY, startX + pillW, startY + pillH);
@@ -1441,6 +1580,13 @@ void BuildToolbarLayout(int screenW, int screenH) {
             if (startX < 0.0f) startX = (screenW - barW) * 0.5f;
             if (startY < 0.0f) startY = (screenH - barH - 24.0f);
         }
+    }
+
+    ClampToolbarToScreen(startX, startY, barW, barH, 6.0f);
+    if (startX != g_toolbarCustomX || startY != g_toolbarCustomY) {
+        g_toolbarCustomX = startX;
+        g_toolbarCustomY = startY;
+        SavePersistentToolbarState();
     }
 
     g_toolbarRect = D2D1::RectF(startX, startY, startX + barW, startY + barH);
@@ -2741,18 +2887,23 @@ void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT) {
     const int kItemCount = 5;
     const float flyoutH = padY * 2.0f + kItemCount * itemH; // 172.0f
 
+    float monL = 0, monT = 0, monR = 0, monB = 0;
+    GetMonitorBoundsAt((btnAbsLeft + btnAbsRight) * 0.5f, g_toolbarRect.top, monL, monT, monR, monB);
+
     float flyoutX = (btnAbsLeft + btnAbsRight) * 0.5f - flyoutW * 0.5f;
-    if (flyoutX < 12.0f) flyoutX = 12.0f;
-    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    if (flyoutX + flyoutW > (float)vw - 12.0f) {
-        flyoutX = (float)vw - flyoutW - 12.0f;
+    if (flyoutX < monL + 8.0f) flyoutX = monL + 8.0f;
+    if (flyoutX + flyoutW > monR - 8.0f) {
+        flyoutX = monR - flyoutW - 8.0f;
     }
 
     float flyoutY = g_toolbarRect.top - flyoutH - 8.0f;
     bool showAbove = true;
-    if (flyoutY < 12.0f) {
+    if (flyoutY < monT + 8.0f) {
         flyoutY = g_toolbarRect.bottom + 8.0f;
         showAbove = false;
+    }
+    if (flyoutY + flyoutH > monB - 8.0f) {
+        flyoutY = monB - flyoutH - 8.0f;
     }
 
     g_shapesFlyoutRect = D2D1::RectF(flyoutX, flyoutY, flyoutX + flyoutW, flyoutY + flyoutH);
@@ -2993,18 +3144,23 @@ void DrawGridFlyout(ID2D1HwndRenderTarget* pRT) {
     const float divH = 8.0f;
     const float flyoutH = padY * 2.0f + itemH * 6 + divH;
 
+    float monL = 0, monT = 0, monR = 0, monB = 0;
+    GetMonitorBoundsAt((btnAbsLeft + btnAbsRight) * 0.5f, g_toolbarRect.top, monL, monT, monR, monB);
+
     float flyoutX = (btnAbsLeft + btnAbsRight) * 0.5f - flyoutW * 0.5f;
-    if (flyoutX < 12.0f) flyoutX = 12.0f;
-    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    if (flyoutX + flyoutW > (float)vw - 12.0f) {
-        flyoutX = (float)vw - flyoutW - 12.0f;
+    if (flyoutX < monL + 8.0f) flyoutX = monL + 8.0f;
+    if (flyoutX + flyoutW > monR - 8.0f) {
+        flyoutX = monR - flyoutW - 8.0f;
     }
 
     float flyoutY = g_toolbarRect.top - flyoutH - 8.0f;
     bool showAbove = true;
-    if (flyoutY < 12.0f) {
+    if (flyoutY < monT + 8.0f) {
         flyoutY = g_toolbarRect.bottom + 8.0f;
         showAbove = false;
+    }
+    if (flyoutY + flyoutH > monB - 8.0f) {
+        flyoutY = monB - flyoutH - 8.0f;
     }
 
     g_gridFlyoutRect = D2D1::RectF(flyoutX, flyoutY, flyoutX + flyoutW, flyoutY + flyoutH);
@@ -3185,16 +3341,21 @@ void DrawColorFlyout(ID2D1HwndRenderTarget* pRT) {
     const float flyoutW = 244.0f;
     const float flyoutH = 312.0f;
 
+    float monL = 0, monT = 0, monR = 0, monB = 0;
+    GetMonitorBoundsAt((btnAbsLeft + btnAbsRight) * 0.5f, g_toolbarRect.top, monL, monT, monR, monB);
+
     float flyoutX = (btnAbsLeft + btnAbsRight) * 0.5f - flyoutW * 0.5f;
-    if (flyoutX < 12.0f) flyoutX = 12.0f;
-    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    if (flyoutX + flyoutW > (float)vw - 12.0f) {
-        flyoutX = (float)vw - flyoutW - 12.0f;
+    if (flyoutX < monL + 8.0f) flyoutX = monL + 8.0f;
+    if (flyoutX + flyoutW > monR - 8.0f) {
+        flyoutX = monR - flyoutW - 8.0f;
     }
 
     float flyoutY = g_toolbarRect.top - flyoutH - 8.0f;
-    if (flyoutY < 12.0f) {
+    if (flyoutY < monT + 8.0f) {
         flyoutY = g_toolbarRect.bottom + 8.0f;
+    }
+    if (flyoutY + flyoutH > monB - 8.0f) {
+        flyoutY = monB - flyoutH - 8.0f;
     }
 
     g_colorFlyoutRect = D2D1::RectF(flyoutX, flyoutY, flyoutX + flyoutW, flyoutY + flyoutH);
@@ -4596,6 +4757,17 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == 'B') {
+            if ((GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000)) {
+                g_toolbarCustomX = -1.0f;
+                g_toolbarCustomY = -1.0f;
+                int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                BuildToolbarLayout(vw, vh);
+                SavePersistentToolbarState();
+                ShowToastNotification(L"Toolbar Position Reset to Center");
+                InvalidateOverlay();
+                return 0;
+            }
             g_colorFlyoutOpen = false;
             g_shapesFlyoutOpen = false;
             g_gridFlyoutOpen = false;
@@ -4742,8 +4914,17 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_isPillDragging) {
                 float dx = g_cursorX - g_toolbarDragStart.x;
                 float dy = g_cursorY - g_toolbarDragStart.y;
-                g_toolbarCustomX = g_toolbarRect.left + dx;
-                g_toolbarCustomY = g_toolbarRect.top + dy;
+
+                const float pillW = 82.0f;
+                const float pillH = 30.0f;
+
+                float nextX = g_toolbarRect.left + dx;
+                float nextY = g_toolbarRect.top + dy;
+
+                ClampToolbarToScreen(nextX, nextY, pillW, pillH, 6.0f);
+
+                g_toolbarCustomX = nextX;
+                g_toolbarCustomY = nextY;
                 g_toolbarDragStart = { (LONG)g_cursorX, (LONG)g_cursorY };
 
                 int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -4759,8 +4940,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_isDraggingToolbar) {
             float dx = g_cursorX - g_toolbarDragStart.x;
             float dy = g_cursorY - g_toolbarDragStart.y;
-            g_toolbarCustomX = g_toolbarRect.left + dx;
-            g_toolbarCustomY = g_toolbarRect.top + dy;
+
+            float barW = g_toolbarRect.right - g_toolbarRect.left;
+            float barH = g_toolbarRect.bottom - g_toolbarRect.top;
+            if (barW <= 0.0f) barW = 800.0f;
+            if (barH <= 0.0f) barH = 46.0f;
+
+            float nextX = g_toolbarRect.left + dx;
+            float nextY = g_toolbarRect.top + dy;
+
+            ClampToolbarToScreen(nextX, nextY, barW, barH, 6.0f);
+
+            g_toolbarCustomX = nextX;
+            g_toolbarCustomY = nextY;
             g_toolbarDragStart = { (LONG)g_cursorX, (LONG)g_cursorY };
 
             int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);

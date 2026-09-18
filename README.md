@@ -105,6 +105,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **M** | Pointer (Click-Through) Mode |
 | **G** | Toggle Grid Overlay Flyout |
 | **B** | Collapse / Expand Toolbar Pill |
+| **Ctrl + Shift + B** | Reset Toolbar Position to Primary Screen Center |
 | **V** | Toggle Ink Visibility (Show/Hide) |
 | **C** | Clear All Drawings |
 | **Ctrl + Z** | Undo last stroke |

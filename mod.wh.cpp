@@ -74,8 +74,8 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
    - Flyout modal allows switching styles and toggling density between Low, Medium, and High.
 
 9. **Region Snipping & Full Screenshots**:
-   - **Full Snapshot** (`S` or `Ctrl + S`): Captures the annotated screen to the Windows clipboard (`CF_BITMAP`) and auto-saves to `%USERPROFILE%\Pictures\WinDraw\`.
-   - **Region Snip** (`Ctrl + Shift + S`): Click and drag a selection rectangle to crop and copy/save a specific screen region.
+   - **Region Snip** (`S`): Click and drag a selection rectangle to crop and copy/save a specific screen region.
+   - **Full Snapshot** (`Ctrl + S`): Captures the full annotated screen to the Windows clipboard (`CF_BITMAP`) and auto-saves to `%USERPROFILE%\Pictures\WinDraw\`.
 
 10. **Pan & Zoom Canvas Navigation**:
     - **Pan Mode** (`P` key): Click and drag to reposition drawings across large canvases.
@@ -127,8 +127,8 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **C** | Clear All Drawings |
 | **Ctrl + Z** | Undo last stroke |
 | **Ctrl + Y** | Redo last undone stroke |
-| **S** / **Ctrl + S** | Take Full Screen Snapshot & Copy to Clipboard |
-| **Ctrl + Shift + S** | Region Snipping Tool |
+| **S** | Region Snipping Tool (Crop & Copy to Clipboard) |
+| **Ctrl + S** | Take Full Screen Snapshot & Copy to Clipboard |
 | **[** / **]** | Decrease / Increase Brush Size (or Laser Trail) |
 | **0** / **Ctrl + 0** | Reset Canvas Zoom & Pan |
 | **1 - 4** | Select Preset Colors (Red, Blue, Green, Yellow) |
@@ -5406,11 +5406,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == 'S') {
-            if (GetKeyState(VK_SHIFT) & 0x8000) {
-                StartSnipping();
+            if (GetKeyState(VK_CONTROL) & 0x8000) {
+                CaptureFullScreenSnapshot();
             }
             else {
-                CaptureFullScreenSnapshot();
+                StartSnipping();
             }
             return 0;
         }
@@ -6128,11 +6128,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Snapshot) {
-                if (GetKeyState(VK_SHIFT) & 0x8000) {
-                    StartSnipping();
+                if (GetKeyState(VK_CONTROL) & 0x8000) {
+                    CaptureFullScreenSnapshot();
                 }
                 else {
-                    CaptureFullScreenSnapshot();
+                    StartSnipping();
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Eraser) {
@@ -6708,15 +6708,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                     SetForegroundWindow(hwnd);
                     break;
-                case 10: // Snapshot
+                case 10: // Snapshot (Click for Snip, Ctrl+Click for Full Snapshot)
                     g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
-                    if (GetKeyState(VK_SHIFT) & 0x8000) {
-                        StartSnipping();
+                    g_backdropFlyoutOpen = false;
+                    if (GetKeyState(VK_CONTROL) & 0x8000) {
+                        CaptureFullScreenSnapshot();
                     }
                     else {
-                        CaptureFullScreenSnapshot();
+                        StartSnipping();
                     }
                     break;
                 case 11: // Undo
@@ -7466,8 +7467,8 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 AppendMenuW(hMenu, MF_STRING, 1, g_bIsActive ? L"Hide WinDraw\t(ESC)" : L"Open WinDraw\t(Ctrl+Alt+G)");
                 SetMenuDefaultItem(hMenu, 1, FALSE);
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenuW(hMenu, MF_STRING, 5, L"Region Snipping Tool\t(S)");
                 AppendMenuW(hMenu, MF_STRING, 2, L"Take Full-Screen Snapshot\t(Ctrl+S)");
-                AppendMenuW(hMenu, MF_STRING, 5, L"Region Snipping Tool\t(Ctrl+Shift+S)");
                 AppendMenuW(hMenu, MF_STRING, 6, L"Cycle Whiteboard/Blackboard\t(K)");
                 UINT clearFlags = (g_bIsActive && (!g_strokes.empty() || !g_laserStrokes.empty())) ? MF_STRING : (MF_STRING | MF_GRAYED | MF_DISABLED);
                 AppendMenuW(hMenu, clearFlags, 3, L"Clear Canvas\t(C)");

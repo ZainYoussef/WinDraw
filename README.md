@@ -69,8 +69,8 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
    - Flyout modal allows switching styles and toggling density between Low, Medium, and High.
 
 9. **Region Snipping & Full Screenshots**:
-   - **Full Snapshot** (`S` or `Ctrl + S`): Captures the annotated screen to the Windows clipboard (`CF_BITMAP`) and auto-saves to `%USERPROFILE%\Pictures\WinDraw\`.
-   - **Region Snip** (`Ctrl + Shift + S`): Click and drag a selection rectangle to crop and copy/save a specific screen region.
+   - **Region Snip** (`S`): Click and drag a selection rectangle to crop and copy/save a specific screen region.
+   - **Full Snapshot** (`Ctrl + S`): Captures the full annotated screen to the Windows clipboard (`CF_BITMAP`) and auto-saves to `%USERPROFILE%\Pictures\WinDraw\`.
 
 10. **Pan & Zoom Canvas Navigation**:
     - **Pan Mode** (`P` key): Click and drag to reposition drawings across large canvases.
@@ -122,8 +122,8 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **C** | Clear All Drawings |
 | **Ctrl + Z** | Undo last stroke |
 | **Ctrl + Y** | Redo last undone stroke |
-| **S** / **Ctrl + S** | Take Full Screen Snapshot & Copy to Clipboard |
-| **Ctrl + Shift + S** | Region Snipping Tool |
+| **S** | Region Snipping Tool (Crop & Copy to Clipboard) |
+| **Ctrl + S** | Take Full Screen Snapshot & Copy to Clipboard |
 | **[** / **]** | Decrease / Increase Brush Size (or Laser Trail) |
 | **0** / **Ctrl + 0** | Reset Canvas Zoom & Pan |
 | **1 - 4** | Select Preset Colors (Red, Blue, Green, Yellow) |

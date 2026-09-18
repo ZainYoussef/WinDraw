@@ -3,9 +3,9 @@
 [![Windhawk Mod](https://img.shields.io/badge/Windhawk-Mod-blue.svg)](https://windhawk.net/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6.svg)](https://microsoft.com/windows)
-[![Architecture](https://img.shields.io/badge/Architecture-x86--64%20%7C%20arm64-orange.svg)](#)
+[![Architecture](https://img.shields.io/badge/Architecture-x86--64%20%7C%20x86-orange.svg)](#)
 
-A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite running directly inside `explorer.exe` powered by **Direct2D**, **DirectWrite**, and **Windows Imaging Component (WIC)**.
+A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite running as a dedicated, high-performance tool process powered by **Direct2D**, **DirectWrite**, and **Windows Imaging Component (WIC)**.
 
 ---
 
@@ -22,6 +22,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 1. **Instant Activation & Dismissal**:
    - Press **`Ctrl + Alt + G`** (customizable) anywhere in Windows to begin annotating immediately.
    - Press **`ESC`** or click the **`✕`** Exit button to dismiss the overlay.
+   - Ink strokes survive dismissal so you can re-open WinDraw without losing your work. Press **`C`** (Clear All) whenever you want a completely fresh canvas.
 
 2. **Hardware-Accelerated Inking & Brushes**:
    - 144Hz+ butter-smooth Direct2D drawing with quadratic Bézier curve interpolation.
@@ -40,7 +41,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
    - Floating **Shapes Flyout Modal** for quick visual selection.
 
 4. **Custom Color & Opacity Studio**:
-   - Click the **`+`** slot in the toolbar to open the full-fledged **Color Studio**.
+   - Click the **`+`** slot in the toolbar or press **`5`** to open the full-fledged **Color Studio**.
    - Interactive 2D Saturation-Value picker and continuous 360° Hue spectrum slider.
    - Live **Opacity / Alpha** slider (5% to 100%).
    - One-click **Eyedropper** tool to sample any pixel color directly from your desktop.
@@ -48,7 +49,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
    - Stores and displays your **Last 5 Recent Colors** palette across sessions.
 
 5. **Circular Radial Quick Menu**:
-   - **Quick Right-Click Tap**: Opens a sleek circular radial menu centered at your cursor with seamless directional slice selection and zero dead zones.
+   - **Quick Right-Click Tap**: Opens a sleek circular radial menu centered at your cursor with seamless directional slice selection, orbital color ring, quick tools, and zero dead zones.
    - **Distraction-Free Option Selection**: Hides the mouse crosshair/cursor while open; the responsive glowing sector and color orb highlights directly indicate the selected option. Left-click confirms; right-click or `ESC` dismisses cleanly.
    - **Layer 2 Satellite Fan**: Hover over the top Recent Colors hub to smoothly fan out your latest 5 custom colors in an orbital satellite arc.
    - **Hold & Move Right Mouse Button**: Instant stroke-level eraser with circular radius indicator.
@@ -66,16 +67,17 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 
 8. **Interactive Grid System (`G` key)**:
    - Dot Grid and Graph Lines Grid overlays.
-   - Flyout modal allows switching styles and toggling density between Low, Medium, and High.
+   - Flyout modal allows switching styles and toggling density between Fine, Medium, and Coarse.
+   - Press **`Shift + G`** to cycle grid density (Fine → Medium → Coarse) directly from the keyboard.
 
 9. **Region Snipping & Full Screenshots**:
-   - **Region Snip** (`S`): Click and drag a selection rectangle to crop and copy/save a specific screen region.
-   - **Full Snapshot** (`Ctrl + S`): Captures the full annotated screen to the Windows clipboard (`CF_BITMAP`) and auto-saves to `%USERPROFILE%\Pictures\WinDraw\`.
+   - **Region Snip** (`S` key): Click and drag a selection rectangle to crop and copy/save a specific screen region.
+   - **Full Snapshot** (`Ctrl + S`): Captures the full annotated screen to the Windows clipboard (`CF_DIBV5` / `CF_DIB` / `CF_BITMAP`) and auto-saves to `%USERPROFILE%\Pictures\WinDraw\`.
 
 10. **Pan & Zoom Canvas Navigation**:
     - **Pan Mode** (`P` key): Click and drag to reposition drawings across large canvases.
     - **Canvas Zoom**: While holding Pan or using the mouse wheel, smoothly zoom in and out (15% to 800%) centered on the cursor.
-    - **Reset View**: Press `0` or `Ctrl + 0` to reset zoom to 100% and pan offset to (0, 0).
+    - **Reset View**: Press **`0`** (while in Pan mode) or **`Ctrl + 0`** (any mode) to reset zoom to 100% and pan offset to (0, 0).
 
 11. **Pointer / Click-Through Mode (`M` key)**:
     - Allows interacting with underlying Windows applications and games while keeping your drawings overlaid.
@@ -90,8 +92,9 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
     - **Live Brush Style**: Displays the exact footprint and diameter of your active brush, highlighter, or eraser with real-time color fill and dual-contrast outline.
 
 14. **Temporary Whiteboard & Blackboard Mode (`K` or `Alt + B`)**:
-    - **Multi-Monitor Display Targeting**: Left-click the Whiteboard button on the toolbar to open a Fluent modal flyout where you can choose backdrop styles (`Transparent`, `Whiteboard`, `Blackboard`) and target displays (`Active Screen (Follows Cursor)`, specific monitor `Screen 1`, `Screen 2`, or `All Screens`).
+    - **Multi-Monitor Display Targeting**: Left-click the Whiteboard button on the toolbar to open a Fluent modal flyout where you can choose backdrop styles (`Transparent`, `Whiteboard`, `Blackboard`) and target displays (`Active Screen (Follows Cursor)`, `Primary Screen`, specific monitor `Screen 1`, `Screen 2`, or `All Screens`).
     - **Live Reference Screen**: On multi-monitor setups, isolate your whiteboard/blackboard to a single monitor while keeping your other monitors 100% transparent live desktop for reference documents, IDEs, or communication apps.
+    - **Ephemeral Mode**: Automatically resets backdrop on `ESC` while keeping your ink strokes intact.
     - **Full Snapshot & Snip Support**: Captures solid background and all ink strokes when taking snapshots (`Ctrl + S`) or snips (`S` key).
     - **Smart Contextual Grids**: Automatically adapts grid line colors (dark charcoal on white paper, vibrant cyan on dark slate).
 
@@ -102,7 +105,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | Shortcut | Action |
 |---|---|
 | **Ctrl + Alt + G** | Activate / Open WinDraw Overlay (Customizable) |
-| **ESC** | Dismiss / Close WinDraw Overlay |
+| **ESC** | Dismiss / Close WinDraw Overlay (Preserves Ink) |
 | **F** | Freehand Pen Tool |
 | **H** | Highlighter Tool |
 | **D** | Vanishing Neon Laser Pointer |
@@ -115,7 +118,8 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **P** | Pan Canvas Mode |
 | **M** | Pointer (Click-Through) Mode |
 | **K** / **Alt + B** | Cycle Canvas Backdrop (Transparent → Whiteboard → Blackboard) |
-| **G** | Toggle Grid Overlay Flyout |
+| **G** | Toggle Grid Flyout / Cycle Grid Style |
+| **Shift + G** | Cycle Grid Density (Fine → Medium → Coarse) |
 | **B** | Collapse / Expand Toolbar Pill |
 | **Ctrl + Shift + B** | Reset Toolbar Position to Primary Screen Center |
 | **V** | Toggle Ink Visibility (Show/Hide) |
@@ -125,7 +129,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **S** | Region Snipping Tool (Crop & Copy to Clipboard) |
 | **Ctrl + S** | Take Full Screen Snapshot & Copy to Clipboard |
 | **[** / **]** | Decrease / Increase Brush Size (or Laser Trail) |
-| **0** / **Ctrl + 0** | Reset Canvas Zoom & Pan |
+| **0** / **Ctrl + 0** | Reset Canvas Zoom & Pan (`0` in Pan mode, `Ctrl + 0` anytime) |
 | **1 - 4** | Select Preset Colors (Crimson Red, Tangelo Orange, Amber Gold, Sun Yellow) |
 | **5** | Open Custom Color & Opacity Studio |
 

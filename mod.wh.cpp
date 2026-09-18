@@ -19,6 +19,10 @@
 
 A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite running directly inside `explorer.exe` powered by **Direct2D**, **DirectWrite**, and **Windows Imaging Component (WIC)**.
 
+![WinDraw Inking & Annotation](https://raw.githubusercontent.com/ZainYoussef/WinDraw/main/assets/Screenshot1.png)
+
+![WinDraw Radial Quick Menu & Shapes Flyout](https://raw.githubusercontent.com/ZainYoussef/WinDraw/main/assets/Screenshot2.png)
+
 ### Complete Feature Set:
 
 1. **Instant Activation & Dismissal**:

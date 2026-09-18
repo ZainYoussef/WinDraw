@@ -4672,10 +4672,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         if (wParam == 'S') {
             if (GetKeyState(VK_SHIFT) & 0x8000) {
-                CaptureFullScreenSnapshot();
+                StartSnipping();
             }
             else {
-                StartSnipping();
+                CaptureFullScreenSnapshot();
             }
             return 0;
         }
@@ -5341,10 +5341,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             else if (g_radialHoverTarget == RadialTarget::Snapshot) {
                 if (GetKeyState(VK_SHIFT) & 0x8000) {
-                    CaptureFullScreenSnapshot();
+                    StartSnipping();
                 }
                 else {
-                    StartSnipping();
+                    CaptureFullScreenSnapshot();
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Eraser) {
@@ -5821,10 +5821,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
                     if (GetKeyState(VK_SHIFT) & 0x8000) {
-                        CaptureFullScreenSnapshot();
+                        StartSnipping();
                     }
                     else {
-                        StartSnipping();
+                        CaptureFullScreenSnapshot();
                     }
                     break;
                 case 11: // Undo
@@ -6535,8 +6535,8 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 AppendMenuW(hMenu, MF_STRING, 1, g_bIsActive ? L"Hide WinDraw\t(ESC)" : L"Open WinDraw\t(Ctrl+Alt+G)");
                 SetMenuDefaultItem(hMenu, 1, FALSE);
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-                AppendMenuW(hMenu, MF_STRING, 2, L"Take Snapshot\t(Ctrl+S)");
-                AppendMenuW(hMenu, MF_STRING, 5, L"Full-Screen Snapshot\t(Ctrl+Shift+S)");
+                AppendMenuW(hMenu, MF_STRING, 2, L"Take Full-Screen Snapshot\t(Ctrl+S)");
+                AppendMenuW(hMenu, MF_STRING, 5, L"Region Snipping Tool\t(Ctrl+Shift+S)");
                 UINT clearFlags = (g_bIsActive && !g_strokes.empty()) ? MF_STRING : (MF_STRING | MF_GRAYED | MF_DISABLED);
                 AppendMenuW(hMenu, clearFlags, 3, L"Clear Canvas\t(C)");
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
@@ -6552,10 +6552,10 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                     else ShowOverlay();
                 }
                 else if (cmd == 2) {
-                    StartSnipping();
+                    CaptureFullScreenSnapshot();
                 }
                 else if (cmd == 5) {
-                    CaptureFullScreenSnapshot();
+                    StartSnipping();
                 }
                 else if (cmd == 3) {
                     if (g_bIsActive && !g_strokes.empty()) {

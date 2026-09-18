@@ -229,16 +229,6 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 #include <string>
 #include <algorithm>
 #include <sstream>
-#include <iomanip>
-
-#pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "dwrite.lib")
-#pragma comment(lib, "dwmapi.lib")
-#pragma comment(lib, "user32.lib")
-#pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "windowscodecs.lib")
-#pragma comment(lib, "shell32.lib")
 
 // ----------------------------------------------------------------------------
 // Configuration & Settings
@@ -260,13 +250,23 @@ struct ModSettings {
     int laserTrailDuration;
 } g_settings;
 
+bool GetBoolSetting(PCWSTR settingName, bool defaultVal) {
+    PCWSTR str = Wh_GetStringSetting(settingName);
+    if (!str) return defaultVal;
+    bool val = (wcscmp(str, L"0") != 0 && _wcsicmp(str, L"false") != 0 && str[0] != L'\0');
+    Wh_FreeStringSetting(str);
+    return val;
+}
+
 float GetFloatSetting(PCWSTR settingName, float defaultVal) {
     PCWSTR str = Wh_GetStringSetting(settingName);
     float val = defaultVal;
     if (str && str[0] != L'\0') {
         try { val = std::stof(str); } catch (...) { val = defaultVal; }
     }
-    Wh_FreeStringSetting(str);
+    if (str) {
+        Wh_FreeStringSetting(str);
+    }
     return val;
 }
 
@@ -292,7 +292,9 @@ void LoadSettings() {
     } else {
         g_settings.hotkeyKey = 'G';
     }
-    Wh_FreeStringSetting(keyStr);
+    if (keyStr) {
+        Wh_FreeStringSetting(keyStr);
+    }
     if (g_settings.hotkeyKey == 0) g_settings.hotkeyKey = 'G';
 
     // Safely parse decimals for accurate brush widths
@@ -302,13 +304,13 @@ void LoadSettings() {
     g_settings.defaultHighlighterWidth = GetFloatSetting(L"defaultHighlighterWidth", 18.0f);
     if (g_settings.defaultHighlighterWidth <= 1.0f) g_settings.defaultHighlighterWidth = 18.0f;
 
-    g_settings.showBottomToolbar = Wh_GetIntSetting(L"showBottomToolbar") != 0;
-    g_settings.showTrayIcon = Wh_GetIntSetting(L"showTrayIcon") != 0;
+    g_settings.showBottomToolbar = GetBoolSetting(L"showBottomToolbar", true);
+    g_settings.showTrayIcon = GetBoolSetting(L"showTrayIcon", true);
     g_settings.cornerRadius = Wh_GetIntSetting(L"cornerRadius");
     if (g_settings.cornerRadius <= 0) g_settings.cornerRadius = 5;
 
-    g_settings.autoSaveSnapshot = Wh_GetIntSetting(L"autoSaveSnapshot") != 0;
-    g_settings.freezeScreen = Wh_GetIntSetting(L"freezeScreen") != 0;
+    g_settings.autoSaveSnapshot = GetBoolSetting(L"autoSaveSnapshot", false);
+    g_settings.freezeScreen = GetBoolSetting(L"freezeScreen", true);
 
     PCWSTR pathStr = Wh_GetStringSetting(L"customSnapshotPath");
     if (pathStr) {
@@ -323,11 +325,13 @@ void LoadSettings() {
         g_settings.defaultStartupTool = 1;
     }
 
-    g_settings.showToastNotifications = Wh_GetIntSetting(L"showToastNotifications") != 0;
+    g_settings.showToastNotifications = GetBoolSetting(L"showToastNotifications", true);
 
-    g_settings.laserTrailDuration = Wh_GetIntSetting(L"laserTrailDuration");
-    if (g_settings.laserTrailDuration < 200 || g_settings.laserTrailDuration > 5000) {
-        g_settings.laserTrailDuration = (g_settings.laserTrailDuration <= 0) ? 800 : std::max(200, std::min(5000, g_settings.laserTrailDuration));
+    int laserDuration = Wh_GetIntSetting(L"laserTrailDuration");
+    if (laserDuration < 200 || laserDuration > 5000) {
+        g_settings.laserTrailDuration = 800;
+    } else {
+        g_settings.laserTrailDuration = laserDuration;
     }
 }
 
@@ -360,6 +364,39 @@ struct LaserPoint {
 };
 struct LaserStroke {
     std::deque<LaserPoint> points;
+    ID2D1PathGeometry* pCachedGeometry;
+
+    LaserStroke() : pCachedGeometry(nullptr) {}
+    ~LaserStroke() { ReleaseGeometry(); }
+
+    LaserStroke(const LaserStroke& other) = delete;
+    LaserStroke& operator=(const LaserStroke& other) = delete;
+
+    LaserStroke(LaserStroke&& other) noexcept
+        : points(std::move(other.points)), pCachedGeometry(other.pCachedGeometry) {
+        other.pCachedGeometry = nullptr;
+    }
+
+    LaserStroke& operator=(LaserStroke&& other) noexcept {
+        if (this != &other) {
+            ReleaseGeometry();
+            points = std::move(other.points);
+            pCachedGeometry = other.pCachedGeometry;
+            other.pCachedGeometry = nullptr;
+        }
+        return *this;
+    }
+
+    void ReleaseGeometry() {
+        if (pCachedGeometry) {
+            pCachedGeometry->Release();
+            pCachedGeometry = nullptr;
+        }
+    }
+
+    void InvalidateGeometry() {
+        ReleaseGeometry();
+    }
 };
 static std::deque<LaserStroke> g_laserStrokes;
 static bool g_isLaserDrawing = false;
@@ -597,6 +634,11 @@ static ULONGLONG g_rightMouseDownTime = 0;
 static float g_cursorX = 0;
 static float g_cursorY = 0;
 static float g_eraserRadius = 24.0f;
+
+// Timer IDs
+const UINT_PTR TIMER_ID_UI_ANIMATION  = 1; // 30ms: Toast fade, size preview, zoom preview
+const UINT_PTR TIMER_ID_POINTER_WATCH = 2; // 20ms: Pointer (click-through) mode toolbar interaction
+const UINT_PTR TIMER_ID_LASER         = 3; // 16ms: High-precision laser trail physics & erosion
 
 // Radial Menu State
 enum class RadialTarget {
@@ -1158,7 +1200,7 @@ void ShowToastNotification(const std::wstring& msg) {
         g_toastMessage = msg;
         g_toastStartTime = GetTickCount64();
         if (g_hOverlayWnd) {
-            SetTimer(g_hOverlayWnd, 1, 16, NULL);
+            SetTimer(g_hOverlayWnd, TIMER_ID_UI_ANIMATION, 30, NULL);
         }
         InvalidateOverlay();
     }
@@ -2867,14 +2909,12 @@ void DrawShapesFlyout(ID2D1HwndRenderTarget* pRT) {
     if (!g_shapesFlyoutOpen || !g_settings.showBottomToolbar) return;
 
     // 1. Locate the Shapes button (id 25) on the toolbar to align directly above it
-    float btnAbsLeft = 0, btnAbsTop = 0, btnAbsRight = 0, btnAbsBottom = 0;
+    float btnAbsLeft = 0, btnAbsRight = 0;
     bool foundBtn = false;
     for (const auto& btn : g_toolbarButtons) {
         if (btn.id == 25) {
             btnAbsLeft = btn.rect.left;
-            btnAbsTop = btn.rect.top;
             btnAbsRight = btn.rect.right;
-            btnAbsBottom = btn.rect.bottom;
             foundBtn = true;
             break;
         }
@@ -3124,14 +3164,12 @@ void DrawGridFlyout(ID2D1HwndRenderTarget* pRT) {
     if (!g_gridFlyoutOpen || !g_settings.showBottomToolbar) return;
 
     // 1. Locate the Grid button (id 6) on the toolbar
-    float btnAbsLeft = 0, btnAbsTop = 0, btnAbsRight = 0, btnAbsBottom = 0;
+    float btnAbsLeft = 0, btnAbsRight = 0;
     bool foundBtn = false;
     for (const auto& btn : g_toolbarButtons) {
         if (btn.id == 6) {
             btnAbsLeft = btn.rect.left;
-            btnAbsTop = btn.rect.top;
             btnAbsRight = btn.rect.right;
-            btnAbsBottom = btn.rect.bottom;
             foundBtn = true;
             break;
         }
@@ -3317,23 +3355,19 @@ void DrawColorFlyout(ID2D1HwndRenderTarget* pRT) {
     if (!g_colorFlyoutOpen || !g_settings.showBottomToolbar) return;
 
     // 1. Locate the Custom Color button (id 104) on the toolbar
-    float btnAbsLeft = 0, btnAbsTop = 0, btnAbsRight = 0, btnAbsBottom = 0;
+    float btnAbsLeft = 0, btnAbsRight = 0;
     bool foundBtn = false;
     for (const auto& btn : g_toolbarButtons) {
         if (btn.id == 104) {
             btnAbsLeft = btn.rect.left;
-            btnAbsTop = btn.rect.top;
             btnAbsRight = btn.rect.right;
-            btnAbsBottom = btn.rect.bottom;
             foundBtn = true;
             break;
         }
     }
     if (!foundBtn && g_toolbarCollapsed) {
         btnAbsLeft = g_toolbarRect.left;
-        btnAbsTop = g_toolbarRect.top;
         btnAbsRight = g_toolbarRect.right;
-        btnAbsBottom = g_toolbarRect.bottom;
         foundBtn = true;
     }
     if (!foundBtn) return;
@@ -3697,7 +3731,7 @@ void DrawLaserTrail(ID2D1HwndRenderTarget* pRT) {
     }
 
     // Process and draw each stroke independently so disconnected strokes NEVER link together
-    for (const auto& stroke : g_laserStrokes) {
+    for (auto& stroke : g_laserStrokes) {
         if (stroke.points.empty()) continue;
 
         size_t count = stroke.points.size();
@@ -3725,44 +3759,52 @@ void DrawLaserTrail(ID2D1HwndRenderTarget* pRT) {
                 continue;
             }
 
-            ID2D1PathGeometry* pGeom = nullptr;
-            if (g_pD2DFactory && SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pGeom))) {
-                ID2D1GeometrySink* pSink = nullptr;
-                if (SUCCEEDED(pGeom->Open(&pSink))) {
-                    pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
-                    pSink->BeginFigure(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+            // Build or reuse cached geometry: avoids recreating COM objects from scratch every 16ms
+            if (!stroke.pCachedGeometry && g_pD2DFactory) {
+                ID2D1PathGeometry* pGeom = nullptr;
+                if (SUCCEEDED(g_pD2DFactory->CreatePathGeometry(&pGeom))) {
+                    ID2D1GeometrySink* pSink = nullptr;
+                    if (SUCCEEDED(pGeom->Open(&pSink))) {
+                        pSink->SetFillMode(D2D1_FILL_MODE_WINDING);
+                        pSink->BeginFigure(D2D1::Point2F(stroke.points[0].x, stroke.points[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
 
-                    if (count == 2) {
-                        pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
-                    }
-                    else {
-                        // Smooth Quadratic Bézier spline through midpoints (seamless, zero dots)
-                        for (size_t k = 0; k + 1 < count; ++k) {
-                            D2D1_POINT_2F midPoint = D2D1::Point2F(
-                                (stroke.points[k].x + stroke.points[k + 1].x) * 0.5f,
-                                (stroke.points[k].y + stroke.points[k + 1].y) * 0.5f
-                            );
-                            pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
-                                D2D1::Point2F(stroke.points[k].x, stroke.points[k].y),
-                                midPoint
-                            ));
+                        if (count == 2) {
+                            pSink->AddLine(D2D1::Point2F(stroke.points[1].x, stroke.points[1].y));
                         }
-                        pSink->AddLine(D2D1::Point2F(stroke.points[count - 1].x, stroke.points[count - 1].y));
+                        else {
+                            // Smooth Quadratic Bézier spline through midpoints (seamless, zero dots)
+                            for (size_t k = 0; k + 1 < count; ++k) {
+                                D2D1_POINT_2F midPoint = D2D1::Point2F(
+                                    (stroke.points[k].x + stroke.points[k + 1].x) * 0.5f,
+                                    (stroke.points[k].y + stroke.points[k + 1].y) * 0.5f
+                                );
+                                pSink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                                    D2D1::Point2F(stroke.points[k].x, stroke.points[k].y),
+                                    midPoint
+                                ));
+                            }
+                            pSink->AddLine(D2D1::Point2F(stroke.points[count - 1].x, stroke.points[count - 1].y));
+                        }
+
+                        pSink->EndFigure(D2D1_FIGURE_END_OPEN);
+                        pSink->Close();
+                        pSink->Release();
+
+                        stroke.pCachedGeometry = pGeom;
+                    } else {
+                        pGeom->Release();
                     }
-
-                    pSink->EndFigure(D2D1_FIGURE_END_OPEN);
-                    pSink->Close();
-                    pSink->Release();
-
-                    // Outer Vibrant Neon Glow
-                    pGlowBrush->SetOpacity(0.52f * strokeLife);
-                    pRT->DrawGeometry(pGeom, pGlowBrush, 6.5f, g_pRoundStrokeStyle);
-
-                    // Hot Inner Laser Beam Core
-                    pCoreBrush->SetOpacity(0.95f * strokeLife);
-                    pRT->DrawGeometry(pGeom, pCoreBrush, 2.5f, g_pRoundStrokeStyle);
                 }
-                pGeom->Release();
+            }
+
+            if (stroke.pCachedGeometry) {
+                // Outer Vibrant Neon Glow
+                pGlowBrush->SetOpacity(0.52f * strokeLife);
+                pRT->DrawGeometry(stroke.pCachedGeometry, pGlowBrush, 6.5f, g_pRoundStrokeStyle);
+
+                // Hot Inner Laser Beam Core
+                pCoreBrush->SetOpacity(0.95f * strokeLife);
+                pRT->DrawGeometry(stroke.pCachedGeometry, pCoreBrush, 2.5f, g_pRoundStrokeStyle);
             }
         }
     }
@@ -3774,7 +3816,20 @@ void DrawLaserTrail(ID2D1HwndRenderTarget* pRT) {
 void DrawLaserCursor(ID2D1HwndRenderTarget* pRT) {
     if (g_currentTool != ToolMode::Laser) return;
     if (g_isSnipping) return;
-    if (g_isLaserDrawing) return; // Suppress cursor bead during active laser trail drawing to prevent dot stacking
+    if (g_isLaserDrawing) {
+        // If the user is actively drawing and moving, suppress cursor bead to avoid dot stacking.
+        // If the user pauses / stops moving while holding the button, keep bead visible so they have continuous pointing feedback.
+        bool hasActiveMovingTip = false;
+        if (!g_laserStrokes.empty() && !g_laserStrokes.back().points.empty()) {
+            ULONGLONG now = GetTickCount64();
+            ULONGLONG age = (now >= g_laserStrokes.back().points.back().timestamp) ?
+                            (now - g_laserStrokes.back().points.back().timestamp) : 0;
+            if (age < 80) {
+                hasActiveMovingTip = true;
+            }
+        }
+        if (hasActiveMovingTip) return;
+    }
 
     // Do not draw laser bead over toolbar or flyouts
     if (g_shapesFlyoutOpen &&
@@ -3929,7 +3984,6 @@ void RenderOverlay() {
 
 bool EraseWholeShapeAt(float x, float y, float radius) {
     float adjustedRadius = radius / g_zoomScale;
-    float rSq = adjustedRadius * adjustedRadius;
     bool changed = false;
     float adjustedX = (x - g_panOffsetX) / g_zoomScale;
     float adjustedY = (y - g_panOffsetY) / g_zoomScale;
@@ -4199,6 +4253,16 @@ void CopySnapshotToClipboard() {
     CaptureFullScreenSnapshot();
 }
 
+inline bool EnsureDirectoryExists(const std::wstring& path) {
+    if (path.empty()) return false;
+    DWORD attribs = GetFileAttributesW(path.c_str());
+    if (attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY)) {
+        return true;
+    }
+    int res = SHCreateDirectoryExW(NULL, path.c_str(), NULL);
+    return (res == ERROR_SUCCESS || res == ERROR_ALREADY_EXISTS || res == ERROR_FILE_EXISTS);
+}
+
 void SaveCroppedSnapshot(int left, int top, int width, int height) {
     if (!g_hSnipBackdrop || width <= 0 || height <= 0) {
         CancelSnipping();
@@ -4241,25 +4305,20 @@ void SaveCroppedSnapshot(int left, int top, int width, int height) {
     SelectObject(hDstDC, hOldDst);
     SelectObject(hSrcDC, hOldSrc);
 
-    // Auto-save PNG if enabled (with millisecond timestamp & overwrite prevention)
+    // Auto-save PNG if enabled (with recursive directory creation & overwrite prevention)
     bool savedToFile = false;
     if (g_settings.autoSaveSnapshot) {
         std::wstring targetDir = L"";
         if (!g_settings.customSnapshotPath.empty()) {
-            DWORD attribs = GetFileAttributesW(g_settings.customSnapshotPath.c_str());
-            if (attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (EnsureDirectoryExists(g_settings.customSnapshotPath)) {
                 targetDir = g_settings.customSnapshotPath;
-            } else {
-                if (CreateDirectoryW(g_settings.customSnapshotPath.c_str(), NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
-                    targetDir = g_settings.customSnapshotPath;
-                }
             }
         }
         if (targetDir.empty()) {
             wchar_t picturesPath[MAX_PATH];
             if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
                 targetDir = std::wstring(picturesPath) + L"\\WinDraw";
-                CreateDirectoryW(targetDir.c_str(), NULL);
+                EnsureDirectoryExists(targetDir);
             }
         }
 
@@ -4331,8 +4390,10 @@ void SaveCroppedSnapshot(int left, int top, int width, int height) {
         } else {
             g_toastMessage = L"Snapshot capture failed";
         }
-        g_toastStartTime = GetTickCount64();
-        if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, 1, 30, NULL);
+        if (g_toastStartTime != 0) {
+            g_toastStartTime = GetTickCount64();
+        }
+        if (g_hOverlayWnd) SetTimer(g_hOverlayWnd, TIMER_ID_UI_ANIMATION, 30, NULL);
     }
 
     DeleteDC(hDstDC);
@@ -4360,17 +4421,17 @@ void SetToolMode(ToolMode newMode) {
             LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
             SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
             SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-            SetTimer(g_hOverlayWnd, 2, 20, NULL);
+            SetTimer(g_hOverlayWnd, TIMER_ID_POINTER_WATCH, 20, NULL);
 
             if (g_settings.showToastNotifications) {
                 g_toastMessage = L"Pointer Mode: Click-through active";
                 g_toastStartTime = GetTickCount64();
-                SetTimer(g_hOverlayWnd, 1, 30, NULL);
+                SetTimer(g_hOverlayWnd, TIMER_ID_UI_ANIMATION, 30, NULL);
             }
         }
         else if (oldMode == ToolMode::Pointer) {
             // Exit Pointer mode:
-            KillTimer(g_hOverlayWnd, 2);
+            KillTimer(g_hOverlayWnd, TIMER_ID_POINTER_WATCH);
             LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
             SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
             SetWindowPos(g_hOverlayWnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
@@ -4378,7 +4439,7 @@ void SetToolMode(ToolMode newMode) {
             if (g_settings.showToastNotifications) {
                 g_toastMessage = L"Drawing Mode active";
                 g_toastStartTime = GetTickCount64();
-                SetTimer(g_hOverlayWnd, 1, 30, NULL);
+                SetTimer(g_hOverlayWnd, TIMER_ID_UI_ANIMATION, 30, NULL);
             }
         }
 
@@ -4482,7 +4543,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
 
                 g_zoomPreviewTime = GetTickCount64();
-                SetTimer(hwnd, 1, 30, NULL);
+                SetTimer(hwnd, TIMER_ID_UI_ANIMATION, 30, NULL);
                 InvalidateOverlay();
             }
             return 0;
@@ -4498,7 +4559,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_toastMessage = buf;
                 g_toastStartTime = GetTickCount64();
             }
-            SetTimer(hwnd, 1, 30, NULL);
+            SetTimer(hwnd, TIMER_ID_UI_ANIMATION, 30, NULL);
             InvalidateOverlay();
             return 0;
         }
@@ -4512,13 +4573,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_currentPenWidth = g_settings.defaultPenWidth;
         }
         g_sizePreviewTime = GetTickCount64();
-        SetTimer(hwnd, 1, 30, NULL);
+        SetTimer(hwnd, TIMER_ID_UI_ANIMATION, 30, NULL);
         InvalidateOverlay();
         return 0;
     }
 
     case WM_TIMER: {
-        if (wParam == 1) {
+        if (wParam == TIMER_ID_UI_ANIMATION) {
             bool needTimer = false;
             ULONGLONG now = GetTickCount64();
             if (g_zoomPreviewTime != 0) {
@@ -4542,13 +4603,28 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     needTimer = true;
                 }
             }
+            InvalidateOverlay();
+            if (!needTimer) {
+                KillTimer(hwnd, TIMER_ID_UI_ANIMATION);
+            }
+            return 0;
+        }
+        if (wParam == TIMER_ID_LASER) {
+            bool needTimer = false;
+            ULONGLONG now = GetTickCount64();
             if (!g_laserStrokes.empty() || g_isLaserDrawing) {
                 ULONGLONG duration = (ULONGLONG)std::max(200, g_settings.laserTrailDuration);
                 for (auto it = g_laserStrokes.begin(); it != g_laserStrokes.end(); ) {
+                    bool popped = false;
                     while (!it->points.empty() && (now - it->points.front().timestamp > duration)) {
                         it->points.pop_front();
+                        popped = true;
+                    }
+                    if (popped) {
+                        it->InvalidateGeometry();
                     }
                     if (it->points.empty()) {
+                        it->ReleaseGeometry();
                         it = g_laserStrokes.erase(it);
                     } else {
                         ++it;
@@ -4560,11 +4636,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             InvalidateOverlay();
             if (!needTimer) {
-                KillTimer(hwnd, 1);
+                KillTimer(hwnd, TIMER_ID_LASER);
             }
             return 0;
         }
-        if (wParam == 2) {
+        if (wParam == TIMER_ID_POINTER_WATCH) {
             // Pointer (Click-Through) mode: monitor mouse to allow interacting with the toolbar
             if (g_currentTool == ToolMode::Pointer && g_bIsActive) {
                 POINT pt;
@@ -4615,7 +4691,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             else {
-                KillTimer(hwnd, 2);
+                KillTimer(hwnd, TIMER_ID_POINTER_WATCH);
                 LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
                 if (exStyle & WS_EX_TRANSPARENT) {
                     SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -4653,7 +4729,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_panStartPos = { (LONG)g_cursorX, (LONG)g_cursorY };
             }
             g_zoomPreviewTime = GetTickCount64();
-            SetTimer(hwnd, 1, 30, NULL);
+            SetTimer(hwnd, TIMER_ID_UI_ANIMATION, 30, NULL);
             InvalidateOverlay();
             return 0;
         }
@@ -4719,9 +4795,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (wParam == 'H') { SetToolMode(ToolMode::Highlighter); return 0; }
         if (wParam == 'V') { g_inkVisible = !g_inkVisible; InvalidateOverlay(); return 0; }
         if (wParam == 'C') {
-            if (!g_strokes.empty()) {
-                PushUndoState();
+            if (!g_strokes.empty() || !g_laserStrokes.empty()) {
+                if (!g_strokes.empty()) PushUndoState();
                 g_strokes.clear();
+                g_laserStrokes.clear();
+                if (!g_isLaserDrawing) KillTimer(hwnd, TIMER_ID_LASER);
                 InvalidateOverlay();
             }
             return 0;
@@ -4799,7 +4877,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_toastMessage = buf;
                     g_toastStartTime = GetTickCount64();
                 }
-                SetTimer(hwnd, 1, 30, NULL);
+                SetTimer(hwnd, TIMER_ID_UI_ANIMATION, 30, NULL);
                 InvalidateOverlay();
                 return 0;
             }
@@ -4823,7 +4901,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_toastMessage = buf;
                     g_toastStartTime = GetTickCount64();
                 }
-                SetTimer(hwnd, 1, 30, NULL);
+                SetTimer(hwnd, TIMER_ID_UI_ANIMATION, 30, NULL);
                 InvalidateOverlay();
                 return 0;
             }
@@ -4877,7 +4955,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             const float contentW = (g_colorFlyoutRect.right - g_colorFlyoutRect.left) - padX * 2.0f;
             float curY = g_colorFlyoutRect.top + 12.0f + 22.0f + 10.0f; // Top of canvas
             const float canvasH = 118.0f;
-            const float trackH = 12.0f;
 
             if (g_pickerDrag == ColorPickerDrag::SatValCanvas) {
                 float s = (g_cursorX - (g_colorFlyoutRect.left + padX)) / contentW;
@@ -5256,10 +5333,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                 pts.push_back({ midX, midY, midT });
                             }
                             pts.push_back({ adjX, adjY, GetTickCount64() });
-                            SetTimer(hwnd, 1, 16, NULL);
+                            g_laserStrokes.back().InvalidateGeometry();
+                            SetTimer(hwnd, TIMER_ID_LASER, 16, NULL);
                         }
                     } else {
                         pts.push_back({ adjX, adjY, GetTickCount64() });
+                        g_laserStrokes.back().InvalidateGeometry();
                     }
                 }
             }
@@ -5334,9 +5413,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Clear) {
-                if (!g_strokes.empty()) {
-                    PushUndoState();
+                if (!g_strokes.empty() || !g_laserStrokes.empty()) {
+                    if (!g_strokes.empty()) PushUndoState();
                     g_strokes.clear();
+                    g_laserStrokes.clear();
+                    if (!g_isLaserDrawing) KillTimer(hwnd, TIMER_ID_LASER);
                 }
             }
             else if (g_radialHoverTarget == RadialTarget::Snapshot) {
@@ -5843,9 +5924,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_colorFlyoutOpen = false;
                     g_shapesFlyoutOpen = false;
                     g_gridFlyoutOpen = false;
-                    if (!g_strokes.empty()) {
-                        PushUndoState();
+                    if (!g_strokes.empty() || !g_laserStrokes.empty()) {
+                        if (!g_strokes.empty()) PushUndoState();
                         g_strokes.clear();
+                        g_laserStrokes.clear();
+                        if (!g_isLaserDrawing) KillTimer(hwnd, TIMER_ID_LASER);
                     }
                     break;
                 case 98: // Minimize / Collapse Toolbar into indicator pill
@@ -5894,7 +5977,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             float adjY = (y - g_panOffsetY) / g_zoomScale;
             g_laserStrokes.emplace_back();
             g_laserStrokes.back().points.push_back({ adjX, adjY, GetTickCount64() });
-            SetTimer(hwnd, 1, 16, NULL);
+            SetTimer(hwnd, TIMER_ID_LASER, 16, NULL);
             InvalidateOverlay();
             return 0;
         }
@@ -5966,6 +6049,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (!g_laserStrokes.empty() && !g_laserStrokes.back().points.empty()) {
                 if (DistanceSq(adjX, adjY, g_laserStrokes.back().points.back().x, g_laserStrokes.back().points.back().y) >= 4.0f) {
                     g_laserStrokes.back().points.push_back({ adjX, adjY, GetTickCount64() });
+                    g_laserStrokes.back().InvalidateGeometry();
                 }
             }
             InvalidateOverlay();
@@ -6322,8 +6406,9 @@ void HideOverlay() {
         if (GetCapture() == g_hOverlayWnd) {
             ReleaseCapture();
         }
-        KillTimer(g_hOverlayWnd, 1);
-        KillTimer(g_hOverlayWnd, 2);
+        KillTimer(g_hOverlayWnd, TIMER_ID_UI_ANIMATION);
+        KillTimer(g_hOverlayWnd, TIMER_ID_POINTER_WATCH);
+        KillTimer(g_hOverlayWnd, TIMER_ID_LASER);
         LONG_PTR exStyle = GetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE);
         if (exStyle & WS_EX_TRANSPARENT) {
             SetWindowLongPtr(g_hOverlayWnd, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
@@ -6537,7 +6622,7 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenuW(hMenu, MF_STRING, 2, L"Take Full-Screen Snapshot\t(Ctrl+S)");
                 AppendMenuW(hMenu, MF_STRING, 5, L"Region Snipping Tool\t(Ctrl+Shift+S)");
-                UINT clearFlags = (g_bIsActive && !g_strokes.empty()) ? MF_STRING : (MF_STRING | MF_GRAYED | MF_DISABLED);
+                UINT clearFlags = (g_bIsActive && (!g_strokes.empty() || !g_laserStrokes.empty())) ? MF_STRING : (MF_STRING | MF_GRAYED | MF_DISABLED);
                 AppendMenuW(hMenu, clearFlags, 3, L"Clear Canvas\t(C)");
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenuW(hMenu, MF_STRING, 4, L"Dismiss Overlay");
@@ -6558,9 +6643,11 @@ LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                     StartSnipping();
                 }
                 else if (cmd == 3) {
-                    if (g_bIsActive && !g_strokes.empty()) {
-                        PushUndoState();
+                    if (g_bIsActive && (!g_strokes.empty() || !g_laserStrokes.empty())) {
+                        if (!g_strokes.empty()) PushUndoState();
                         g_strokes.clear();
+                        g_laserStrokes.clear();
+                        if (!g_isLaserDrawing) KillTimer(hwnd, TIMER_ID_LASER);
                         InvalidateOverlay();
                     }
                 }
@@ -6605,7 +6692,12 @@ DWORD WINAPI HotkeyThread(LPVOID) {
         NULL, NULL, wc.hInstance, NULL
     );
 
-    RegisterHotKey(g_hHotkeyWnd, kHotkeyId, g_settings.hotkeyMod, g_settings.hotkeyKey);
+    BOOL bHotOk = RegisterHotKey(g_hHotkeyWnd, kHotkeyId, g_settings.hotkeyMod, g_settings.hotkeyKey);
+    if (!bHotOk) {
+        Wh_Log(L"WinDraw: Warning - RegisterHotKey failed (error %lu)", GetLastError());
+    } else {
+        Wh_Log(L"WinDraw: Hotkey registered successfully");
+    }
 
     UpdateTrayIcon(g_hHotkeyWnd);
 
@@ -6632,14 +6724,16 @@ BOOL Wh_ModInit() {
     Wh_Log(L"WinDraw: Initializing");
 
     LoadSettings();
+    Wh_Log(L"WinDraw: Settings loaded");
     LoadPersistentState();
+    Wh_Log(L"WinDraw: Persistent state loaded");
     g_currentPenWidth = (g_currentTool == ToolMode::Highlighter) ? g_settings.defaultHighlighterWidth : g_settings.defaultPenWidth;
 
     CoInitialize(NULL);
 
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, &g_pD2DFactory);
     if (FAILED(hr)) {
-        Wh_Log(L"Failed to create Direct2D Factory");
+        Wh_Log(L"Failed to create Direct2D Factory (0x%08X)", hr);
         return FALSE;
     }
 
@@ -6813,6 +6907,7 @@ void Wh_ModUninit() {
 
     // Clean up all strokes and cached geometries before releasing D2D factory
     g_strokes.clear();
+    g_laserStrokes.clear();
     g_undoStack.clear();
     g_redoStack.clear();
     g_currentStroke.InvalidateCache();

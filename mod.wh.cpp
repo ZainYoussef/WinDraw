@@ -90,6 +90,10 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
     - **Clear All** (`C` key) with full undo support.
     - **Hide/Show Ink** (`V` key): Temporarily toggles drawing visibility without clearing strokes.
 
+13. **Customizable Cursor Style & Size**:
+    - **Crosshair Style**: Displays a crisp, dual-contrast precision crosshair with configurable arm size (8px to 32px) and an active color center indicator.
+    - **Live Brush Style**: Displays the exact footprint and diameter of your active brush or highlighter with real-time color fill and dual-contrast outline.
+
 ---
 
 ### Keyboard Shortcuts Reference:
@@ -204,6 +208,24 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
     - 2000: 2.0 seconds (Long)
     - 3500: 3.5 seconds (Very Long)
     - 5000: 5.0 seconds (Persistent - Max)
+
+- crossType: cross
+  $name: Cursor Style (Crosshair / Brush)
+  $description: Choose the inking cursor style. "cross" displays a precision crosshair. "brush" displays the active brush size and color directly under the cursor.
+  $options:
+    - cross: Crosshair
+    - brush: Brush (Show brush size & color)
+
+- crossSize: 16
+  $name: Crosshair Size (px)
+  $description: Length/size of the crosshair cursor arms when Crosshair style is active.
+  $options:
+    - 8: 8 px (Small)
+    - 12: 12 px (Compact)
+    - 16: 16 px (Medium - Default)
+    - 20: 20 px (Large)
+    - 24: 24 px (Extra Large)
+    - 32: 32 px (Huge)
 */
 // ==/WindhawkModSettings==
 
@@ -234,6 +256,11 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 // Configuration & Settings
 // ----------------------------------------------------------------------------
 
+enum class CursorType {
+    Cross,
+    Brush
+};
+
 struct ModSettings {
     UINT hotkeyMod;
     UINT hotkeyKey;
@@ -248,6 +275,8 @@ struct ModSettings {
     int defaultStartupTool;
     bool showToastNotifications;
     int laserTrailDuration;
+    CursorType crossType;
+    int crossSize;
 } g_settings;
 
 bool GetBoolSetting(PCWSTR settingName, bool defaultVal) {
@@ -333,6 +362,21 @@ void LoadSettings() {
     } else {
         g_settings.laserTrailDuration = laserDuration;
     }
+
+    PCWSTR cTypeStr = Wh_GetStringSetting(L"crossType");
+    if (cTypeStr) {
+        if (_wcsicmp(cTypeStr, L"brush") == 0) {
+            g_settings.crossType = CursorType::Brush;
+        } else {
+            g_settings.crossType = CursorType::Cross;
+        }
+        Wh_FreeStringSetting(cTypeStr);
+    } else {
+        g_settings.crossType = CursorType::Cross;
+    }
+
+    int cSize = Wh_GetIntSetting(L"crossSize");
+    g_settings.crossSize = (cSize <= 0) ? 16 : cSize;
 }
 
 // ----------------------------------------------------------------------------
@@ -982,6 +1026,7 @@ void DrawGridFlyout(ID2D1HwndRenderTarget* pRT);
 void DrawColorFlyout(ID2D1HwndRenderTarget* pRT);
 void DrawLaserTrail(ID2D1HwndRenderTarget* pRT);
 void DrawLaserCursor(ID2D1HwndRenderTarget* pRT);
+void DrawInkingCursor(ID2D1HwndRenderTarget* pRT);
 
 // ----------------------------------------------------------------------------
 // Utility Math & Geometry
@@ -2631,6 +2676,129 @@ void DrawEraserCursor(ID2D1HwndRenderTarget* pRT) {
     if (pFillBrush) pFillBrush->Release();
 }
 
+void DrawInkingCursor(ID2D1HwndRenderTarget* pRT) {
+    if (!g_bIsActive) return;
+    if (g_hideUIForCapture) return;
+    if (g_isSnipping || g_isEyedropperActive) return;
+    if (g_currentTool != ToolMode::Pen && g_currentTool != ToolMode::Highlighter) return;
+    if (g_isRightMouseDown || g_isRightClickErasing || g_isRightClickClearing || g_isLeftClickErasing) return;
+    if (g_radialActive) return;
+
+    // Suppress drawing over toolbar, collapsed pill, and open flyouts
+    if (g_shapesFlyoutOpen &&
+        g_cursorX >= g_shapesFlyoutRect.left && g_cursorX <= g_shapesFlyoutRect.right &&
+        g_cursorY >= g_shapesFlyoutRect.top && g_cursorY <= g_shapesFlyoutRect.bottom) {
+        return;
+    }
+    if (g_gridFlyoutOpen &&
+        g_cursorX >= g_gridFlyoutRect.left && g_cursorX <= g_gridFlyoutRect.right &&
+        g_cursorY >= g_gridFlyoutRect.top && g_cursorY <= g_gridFlyoutRect.bottom) {
+        return;
+    }
+    if (g_colorFlyoutOpen &&
+        g_cursorX >= g_colorFlyoutRect.left && g_cursorX <= g_colorFlyoutRect.right &&
+        g_cursorY >= g_colorFlyoutRect.top && g_cursorY <= g_colorFlyoutRect.bottom) {
+        return;
+    }
+    if (g_settings.showBottomToolbar &&
+        g_cursorX >= (g_toolbarRect.left - 4.0f) && g_cursorX <= (g_toolbarRect.right + 4.0f) &&
+        g_cursorY >= (g_toolbarRect.top - 4.0f) && g_cursorY <= (g_toolbarRect.bottom + 4.0f)) {
+        return;
+    }
+
+    if (g_settings.crossType == CursorType::Brush) {
+        // --- Live Brush Size & Color Cursor ---
+        float activeWidth = (g_currentTool == ToolMode::Highlighter) 
+            ? g_settings.defaultHighlighterWidth 
+            : g_currentPenWidth;
+        
+        float screenRadius = std::max(1.5f, (activeWidth * g_zoomScale) * 0.5f);
+
+        D2D1_COLOR_F inkColor = g_activeColor;
+        if (g_currentTool == ToolMode::Highlighter) {
+            inkColor.a = 0.35f;
+        } else {
+            inkColor.a = std::max(0.20f, std::min(0.65f, inkColor.a * 0.60f));
+        }
+
+        ID2D1SolidColorBrush* pFillBrush = nullptr;
+        ID2D1SolidColorBrush* pRingBrush = nullptr;
+        ID2D1SolidColorBrush* pShadowBrush = nullptr;
+        ID2D1SolidColorBrush* pCenterDotBrush = nullptr;
+
+        pRT->CreateSolidColorBrush(inkColor, &pFillBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f), &pRingBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &pShadowBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(g_activeColor.r, g_activeColor.g, g_activeColor.b, 1.0f), &pCenterDotBrush);
+
+        D2D1_ELLIPSE ell = D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), screenRadius, screenRadius);
+
+        if (pFillBrush) {
+            pRT->FillEllipse(ell, pFillBrush);
+            pFillBrush->Release();
+        }
+        // Dual-contrast outline (outer dark shadow ring + inner white ring) visible on all backgrounds
+        if (pShadowBrush) {
+            pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), screenRadius + 0.6f, screenRadius + 0.6f), pShadowBrush, 1.0f);
+        }
+        if (pRingBrush) {
+            pRT->DrawEllipse(ell, pRingBrush, 1.0f);
+        }
+
+        // Precision Center Reticle Dot
+        if (pShadowBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 2.0f, 2.0f), pShadowBrush);
+        }
+        if (pCenterDotBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 1.2f, 1.2f), pCenterDotBrush);
+            pCenterDotBrush->Release();
+        }
+
+        if (pShadowBrush) pShadowBrush->Release();
+        if (pRingBrush) pRingBrush->Release();
+    }
+    else {
+        // --- Precision Crosshair Cursor with Customizable Size ---
+        float arm = (float)std::max(4, g_settings.crossSize);
+
+        ID2D1SolidColorBrush* pShadowBrush = nullptr;
+        ID2D1SolidColorBrush* pWhiteBrush = nullptr;
+        ID2D1SolidColorBrush* pAccentBrush = nullptr;
+
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &pShadowBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &pWhiteBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(g_activeColor.r, g_activeColor.g, g_activeColor.b, 1.0f), &pAccentBrush);
+
+        D2D1_POINT_2F pLeft   = D2D1::Point2F(g_cursorX - arm, g_cursorY);
+        D2D1_POINT_2F pRight  = D2D1::Point2F(g_cursorX + arm, g_cursorY);
+        D2D1_POINT_2F pTop    = D2D1::Point2F(g_cursorX, g_cursorY - arm);
+        D2D1_POINT_2F pBottom = D2D1::Point2F(g_cursorX, g_cursorY + arm);
+
+        // 1. Dual-contrast shadow lines (2.5px dark background for universal contrast)
+        if (pShadowBrush) {
+            pRT->DrawLine(pLeft, pRight, pShadowBrush, 2.5f);
+            pRT->DrawLine(pTop, pBottom, pShadowBrush, 2.5f);
+        }
+
+        // 2. Crisp 1.2px white crosshair core
+        if (pWhiteBrush) {
+            pRT->DrawLine(pLeft, pRight, pWhiteBrush, 1.2f);
+            pRT->DrawLine(pTop, pBottom, pWhiteBrush, 1.2f);
+            pWhiteBrush->Release();
+        }
+
+        // 3. Pinpoint center dot in active brush color
+        if (pShadowBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 2.2f, 2.2f), pShadowBrush);
+            pShadowBrush->Release();
+        }
+        if (pAccentBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 1.4f, 1.4f), pAccentBrush);
+            pAccentBrush->Release();
+        }
+    }
+}
+
 void DrawPenSizePreview(ID2D1HwndRenderTarget* pRT) {
     if (g_sizePreviewTime == 0) return;
     ULONGLONG elapsed = GetTickCount64() - g_sizePreviewTime;
@@ -3934,9 +4102,10 @@ void RenderOverlay() {
         DrawSnippingOverlay(g_pRenderTarget);
     }
     else {
-        // 4. Eraser cursor, Laser bead cursor, Pen size bubble & Zoom badge
+        // 4. Eraser cursor, Laser bead cursor, Inking cursor, Pen size bubble & Zoom badge
         DrawEraserCursor(g_pRenderTarget);
         DrawLaserCursor(g_pRenderTarget);
+        DrawInkingCursor(g_pRenderTarget);
         DrawPenSizePreview(g_pRenderTarget);
         DrawZoomPreview(g_pRenderTarget);
 
@@ -5352,6 +5521,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        // When Pen or Highlighter mode is active, custom cursor follows mouse smoothly!
+        if (g_currentTool == ToolMode::Pen || g_currentTool == ToolMode::Highlighter) {
+            InvalidateOverlay();
+            return 0;
+        }
+
         break;
     }
 
@@ -6272,6 +6447,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 return TRUE;
             }
             if (g_currentTool == ToolMode::Laser) {
+                SetCursor(NULL);
+                return TRUE;
+            }
+            if (g_currentTool == ToolMode::Pen || g_currentTool == ToolMode::Highlighter) {
                 SetCursor(NULL);
                 return TRUE;
             }

@@ -84,6 +84,10 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
     - **Clear All** (`C` key) with full undo support.
     - **Hide/Show Ink** (`V` key): Temporarily toggles drawing visibility without clearing strokes.
 
+13. **Customizable Cursor Style & Size**:
+    - **Crosshair Style**: Displays a crisp, dual-contrast precision crosshair with configurable arm size (8px to 32px) and an active color center indicator.
+    - **Live Brush Style**: Displays the exact footprint and diameter of your active brush or highlighter with real-time color fill and dual-contrast outline.
+
 ---
 
 ## Keyboard Shortcuts Reference

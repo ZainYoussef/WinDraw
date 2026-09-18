@@ -48,7 +48,8 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
    - Stores and displays your **Last 5 Recent Colors** palette across sessions.
 
 5. **Circular Radial Quick Menu**:
-   - **Quick Right-Click Tap**: Opens a sleek circular radial menu centered at your cursor with an orbital color ring, quick tools, and smooth sector hover animations.
+   - **Quick Right-Click Tap**: Opens a sleek circular radial menu centered at your cursor with seamless directional slice selection and zero dead zones.
+   - **Distraction-Free Option Selection**: Hides the mouse crosshair/cursor while open; the responsive glowing sector and color orb highlights directly indicate the selected option. Left-click confirms; right-click or `ESC` dismisses cleanly.
    - **Layer 2 Satellite Fan**: Hover over the top Recent Colors hub to smoothly fan out your latest 5 custom colors in an orbital satellite arc.
    - **Hold & Move Right Mouse Button**: Instant stroke-level eraser with circular radius indicator.
 
@@ -85,8 +86,8 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
     - **Hide/Show Ink** (`V` key): Temporarily toggles drawing visibility without clearing strokes.
 
 13. **Customizable Cursor Style & Size**:
-    - **Crosshair Style**: Displays a crisp, dual-contrast precision crosshair with configurable arm size (8px to 32px) and an active color center indicator.
-    - **Live Brush Style**: Displays the exact footprint and diameter of your active brush or highlighter with real-time color fill and dual-contrast outline.
+    - **Crosshair Style**: Displays a crisp, dual-contrast precision crosshair with configurable arm size (8px to 32px) and an active color/eraser center indicator across Pen, Highlighter, and Eraser.
+    - **Live Brush Style**: Displays the exact footprint and diameter of your active brush, highlighter, or eraser with real-time color fill and dual-contrast outline.
 
 14. **Temporary Whiteboard & Blackboard Mode (`K` or `Alt + B`)**:
     - **Multi-Monitor Display Targeting**: Left-click the Whiteboard button on the toolbar to open a Fluent modal flyout where you can choose backdrop styles (`Transparent`, `Whiteboard`, `Blackboard`) and target displays (`Active Screen (Follows Cursor)`, specific monitor `Screen 1`, `Screen 2`, or `All Screens`).

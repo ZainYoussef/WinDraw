@@ -2783,20 +2783,121 @@ void DrawRadialMenu(ID2D1HwndRenderTarget* pRT) {
 }
 
 void DrawEraserCursor(ID2D1HwndRenderTarget* pRT) {
+    if (!g_bIsActive || g_hideUIForCapture || g_isSnipping || g_isEyedropperActive || g_radialActive) return;
     if (!g_isRightClickErasing && !g_isRightMouseDown && !g_isLeftClickErasing && !g_isRightClickClearing && g_currentTool != ToolMode::Eraser) return;
 
-    ID2D1SolidColorBrush* pFillBrush = nullptr;
-    ID2D1SolidColorBrush* pRingBrush = nullptr;
+    // Suppress drawing over toolbar, collapsed pill, and open flyouts
+    if (g_shapesFlyoutOpen &&
+        g_cursorX >= g_shapesFlyoutRect.left && g_cursorX <= g_shapesFlyoutRect.right &&
+        g_cursorY >= g_shapesFlyoutRect.top && g_cursorY <= g_shapesFlyoutRect.bottom) {
+        return;
+    }
+    if (g_gridFlyoutOpen &&
+        g_cursorX >= g_gridFlyoutRect.left && g_cursorX <= g_gridFlyoutRect.right &&
+        g_cursorY >= g_gridFlyoutRect.top && g_cursorY <= g_gridFlyoutRect.bottom) {
+        return;
+    }
+    if (g_backdropFlyoutOpen &&
+        g_cursorX >= g_backdropFlyoutRect.left && g_cursorX <= g_backdropFlyoutRect.right &&
+        g_cursorY >= g_backdropFlyoutRect.top && g_cursorY <= g_backdropFlyoutRect.bottom) {
+        return;
+    }
+    if (g_colorFlyoutOpen &&
+        g_cursorX >= g_colorFlyoutRect.left && g_cursorX <= g_colorFlyoutRect.right &&
+        g_cursorY >= g_colorFlyoutRect.top && g_cursorY <= g_colorFlyoutRect.bottom) {
+        return;
+    }
+    if (g_settings.showBottomToolbar &&
+        g_cursorX >= (g_toolbarRect.left - 4.0f) && g_cursorX <= (g_toolbarRect.right + 4.0f) &&
+        g_cursorY >= (g_toolbarRect.top - 4.0f) && g_cursorY <= (g_toolbarRect.bottom + 4.0f)) {
+        return;
+    }
 
-    pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 0.22f), &pFillBrush);
-    pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 0.90f), &pRingBrush);
+    if (g_settings.crossType == CursorType::Brush) {
+        // --- Live Eraser Brush Footprint Cursor ---
+        ID2D1SolidColorBrush* pFillBrush = nullptr;
+        ID2D1SolidColorBrush* pRingBrush = nullptr;
+        ID2D1SolidColorBrush* pShadowBrush = nullptr;
+        ID2D1SolidColorBrush* pCenterDotBrush = nullptr;
 
-    D2D1_ELLIPSE ell = D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), g_eraserRadius, g_eraserRadius);
-    pRT->FillEllipse(ell, pFillBrush);
-    pRT->DrawEllipse(ell, pRingBrush, 1.5f);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 0.22f), &pFillBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f), &pRingBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &pShadowBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 1.0f), &pCenterDotBrush);
 
-    if (pRingBrush) pRingBrush->Release();
-    if (pFillBrush) pFillBrush->Release();
+        D2D1_ELLIPSE ell = D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), g_eraserRadius, g_eraserRadius);
+
+        if (pFillBrush) {
+            pRT->FillEllipse(ell, pFillBrush);
+            pFillBrush->Release();
+        }
+        // Dual-contrast outline (outer dark shadow ring + inner white ring)
+        if (pShadowBrush) {
+            pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), g_eraserRadius + 0.6f, g_eraserRadius + 0.6f), pShadowBrush, 1.0f);
+        }
+        if (pRingBrush) {
+            pRT->DrawEllipse(ell, pRingBrush, 1.0f);
+            pRingBrush->Release();
+        }
+
+        // Precision Center Reticle Dot
+        if (pShadowBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 2.0f, 2.0f), pShadowBrush);
+            pShadowBrush->Release();
+        }
+        if (pCenterDotBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 1.2f, 1.2f), pCenterDotBrush);
+            pCenterDotBrush->Release();
+        }
+    }
+    else {
+        // --- Precision Crosshair Cursor with Customizable crossSize & Eraser Reticle ---
+        float arm = (float)std::max(4, g_settings.crossSize);
+
+        ID2D1SolidColorBrush* pShadowBrush = nullptr;
+        ID2D1SolidColorBrush* pWhiteBrush = nullptr;
+        ID2D1SolidColorBrush* pAccentBrush = nullptr;
+        ID2D1SolidColorBrush* pRadiusBrush = nullptr;
+
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &pShadowBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &pWhiteBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 1.0f), &pAccentBrush);
+        pRT->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.35f, 0.40f, 0.30f), &pRadiusBrush);
+
+        // Faint contextual outer circle indicating active eraser blast radius
+        if (pRadiusBrush) {
+            pRT->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), g_eraserRadius, g_eraserRadius), pRadiusBrush, 1.0f);
+            pRadiusBrush->Release();
+        }
+
+        D2D1_POINT_2F pLeft   = D2D1::Point2F(g_cursorX - arm, g_cursorY);
+        D2D1_POINT_2F pRight  = D2D1::Point2F(g_cursorX + arm, g_cursorY);
+        D2D1_POINT_2F pTop    = D2D1::Point2F(g_cursorX, g_cursorY - arm);
+        D2D1_POINT_2F pBottom = D2D1::Point2F(g_cursorX, g_cursorY + arm);
+
+        // 1. Dual-contrast shadow lines (2.5px dark background for universal contrast)
+        if (pShadowBrush) {
+            pRT->DrawLine(pLeft, pRight, pShadowBrush, 2.5f);
+            pRT->DrawLine(pTop, pBottom, pShadowBrush, 2.5f);
+        }
+
+        // 2. Crisp 1.2px white crosshair core
+        if (pWhiteBrush) {
+            pRT->DrawLine(pLeft, pRight, pWhiteBrush, 1.2f);
+            pRT->DrawLine(pTop, pBottom, pWhiteBrush, 1.2f);
+            pWhiteBrush->Release();
+        }
+
+        // 3. Pinpoint center dot in eraser coral/red
+        if (pShadowBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 2.2f, 2.2f), pShadowBrush);
+            pShadowBrush->Release();
+        }
+        if (pAccentBrush) {
+            pRT->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g_cursorX, g_cursorY), 1.3f, 1.3f), pAccentBrush);
+            pAccentBrush->Release();
+        }
+    }
 }
 
 void DrawInkingCursor(ID2D1HwndRenderTarget* pRT) {
@@ -5251,6 +5352,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_KEYDOWN: {
         if (wParam == VK_ESCAPE) {
+            if (g_radialActive) {
+                g_radialActive = false;
+                g_radialHoverTarget = RadialTarget::None;
+                g_radialHoverSector = -1;
+                g_hoveredOrb = -1;
+                g_hoveredRecentOrb = -1;
+                g_radialRecentFanOpen = false;
+                InvalidateOverlay();
+                return 0;
+            }
             if (g_shapesFlyoutOpen || g_gridFlyoutOpen || g_backdropFlyoutOpen || g_colorFlyoutOpen) {
                 g_shapesFlyoutOpen = false;
                 g_gridFlyoutOpen = false;
@@ -5593,7 +5704,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        // Check Radial Menu hover
+        // Check Radial Menu hover (Seamless directional selection with zero dead zones)
         if (g_radialActive) {
             float dx = g_cursorX - g_radialX;
             float dy = g_cursorY - g_radialY;
@@ -5609,11 +5720,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hoveredOrb = -1;
             g_hoveredRecentOrb = -1;
 
-            if (dist <= 38.0f) {
+            if (dist <= 40.0f) {
+                // 1. Center Hub (Pen / Highlighter / Laser toggle)
                 g_radialHoverTarget = RadialTarget::Center;
                 g_radialRecentFanOpen = false;
             }
-            else if (dist >= 44.0f && dist <= 102.0f) {
+            else if (dist > 40.0f && dist <= 106.0f) {
+                // 2. Action Ring: 9 Continuous Angular Sectors (Zero Dead Gaps)
                 g_radialRecentFanOpen = false;
                 float angle = std::atan2(dy, dx);
                 if (angle < 0) angle += 2.0f * 3.14159265358979323846f;
@@ -5626,42 +5739,51 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_radialHoverTarget = (RadialTarget)sector;
                 }
             }
-            else if (dist >= 108.0f && dist <= 146.0f) {
-                const float kOrbitalRadius = 126.0f;
-                for (size_t i = 0; i < kPresetColorCount; ++i) {
-                    float angle = (float)(i * (2.0 * 3.14159265358979323846 / kPresetColorCount) - 3.14159265358979323846 * 0.5);
-                    float ox = g_radialX + std::cos(angle) * kOrbitalRadius;
-                    float oy = g_radialY + std::sin(angle) * kOrbitalRadius;
-                    if (DistanceSq(g_cursorX, g_cursorY, ox, oy) <= 18.0f * 18.0f) {
-                        if (i == 0) {
-                            g_radialHoverTarget = RadialTarget::RecentHub;
-                            g_radialRecentFanOpen = true;
-                        } else {
-                            g_hoveredOrb = (int)i;
-                            g_radialHoverTarget = RadialTarget::ColorOrb;
-                            g_radialRecentFanOpen = false;
-                        }
-                        break;
-                    }
-                }
-            }
-            else if (dist >= 146.0f && dist <= 188.0f && g_radialRecentFanOpen) {
-                const float kSatelliteRadius = 162.0f;
-                const float kRad = 3.14159265358979323846f / 180.0f;
-                for (int j = 0; j < (int)g_recentColors.size() && j < 5; ++j) {
-                    float angle = -90.0f * kRad + (float)(j - 2) * (16.0f * kRad);
-                    float sx = g_radialX + std::cos(angle) * kSatelliteRadius;
-                    float sy = g_radialY + std::sin(angle) * kSatelliteRadius;
-                    if (DistanceSq(g_cursorX, g_cursorY, sx, sy) <= 18.0f * 18.0f) {
-                        g_hoveredRecentOrb = j;
-                        g_radialHoverTarget = RadialTarget::RecentOrb;
-                        break;
-                    }
-                }
-            }
             else {
-                if (dist > 195.0f || dy > -20.0f || (dist > 102.0f && (dx < -120.0f || dx > 120.0f))) {
-                    g_radialRecentFanOpen = false;
+                // 3. Outer Ring & Beyond: Color Orbs & Recent Colors Fan
+                // Check if cursor is pointing into the Recent Colors satellite fan at 12 o'clock
+                bool inRecentFan = false;
+                if (g_radialRecentFanOpen && dy < 0.0f && dist >= 135.0f && dist <= 210.0f && !g_recentColors.empty()) {
+                    const float kSatelliteRadius = 162.0f;
+                    const float kRad = 3.14159265358979323846f / 180.0f;
+                    float bestDistSq = 999999.0f;
+                    int bestJ = -1;
+                    for (int j = 0; j < (int)g_recentColors.size() && j < 5; ++j) {
+                        float sAngle = -90.0f * kRad + (float)(j - 2) * (16.0f * kRad);
+                        float sx = g_radialX + std::cos(sAngle) * kSatelliteRadius;
+                        float sy = g_radialY + std::sin(sAngle) * kSatelliteRadius;
+                        float d2 = DistanceSq(g_cursorX, g_cursorY, sx, sy);
+                        if (d2 < bestDistSq) {
+                            bestDistSq = d2;
+                            bestJ = j;
+                        }
+                    }
+                    if (bestJ >= 0 && bestDistSq <= 36.0f * 36.0f) {
+                        g_hoveredRecentOrb = bestJ;
+                        g_radialHoverTarget = RadialTarget::RecentOrb;
+                        inRecentFan = true;
+                    }
+                }
+
+                if (!inRecentFan) {
+                    // Map continuously by angle to the 16 preset color orbs
+                    float angle = std::atan2(dy, dx);
+                    float relAngle = angle - (-3.14159265358979323846f * 0.5f);
+                    while (relAngle < 0.0f) relAngle += 2.0f * 3.14159265358979323846f;
+                    while (relAngle >= 2.0f * 3.14159265358979323846f) relAngle -= 2.0f * 3.14159265358979323846f;
+
+                    const float kOrbStep = (float)(2.0 * 3.14159265358979323846 / (double)kPresetColorCount);
+                    int orbIdx = (int)((relAngle + kOrbStep * 0.5f) / kOrbStep) % kPresetColorCount;
+
+                    if (orbIdx == 0) {
+                        g_radialHoverTarget = RadialTarget::RecentHub;
+                        g_radialRecentFanOpen = true;
+                    }
+                    else {
+                        g_hoveredOrb = orbIdx;
+                        g_radialHoverTarget = RadialTarget::ColorOrb;
+                        g_radialRecentFanOpen = false;
+                    }
                 }
             }
 
@@ -6828,6 +6950,17 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        if (g_radialActive) {
+            g_radialActive = false;
+            g_radialHoverTarget = RadialTarget::None;
+            g_radialHoverSector = -1;
+            g_hoveredOrb = -1;
+            g_hoveredRecentOrb = -1;
+            g_radialRecentFanOpen = false;
+            InvalidateOverlay();
+            return 0;
+        }
+
         // Right-Click hold starts erase (brush in normal mode, whole-shape in Eraser mode), quick tap opens radial menu
         g_isRightMouseDown = true;
         g_isRightClickErasing = false;
@@ -6918,6 +7051,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_SETCURSOR: {
         if (LOWORD(lParam) == HTCLIENT) {
+            if (g_radialActive) {
+                SetCursor(NULL);
+                return TRUE;
+            }
             if (g_isEyedropperActive) {
                 SetCursor(LoadCursor(NULL, IDC_CROSS));
                 return TRUE;
@@ -6931,7 +7068,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 return TRUE;
             }
             if (g_currentTool == ToolMode::Eraser || g_isRightClickErasing || g_isRightMouseDown || g_isLeftClickErasing || g_isRightClickClearing) {
-                SetCursor(LoadCursor(NULL, IDC_CROSS));
+                SetCursor(NULL);
                 return TRUE;
             }
             if (g_currentTool == ToolMode::Pointer) {

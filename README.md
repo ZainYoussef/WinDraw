@@ -65,7 +65,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
    - Scroll wheel while in Laser mode instantly adjusts trail persistence.
 
 8. **Interactive Grid System (`G` key)**:
-   - Dot Grid, Squared Graph Grid, Engineering Grid, and Isometric 3D Triangle Grid overlays.
+   - Dot Grid and Graph Lines Grid overlays.
    - Flyout modal allows switching styles and toggling density between Low, Medium, and High.
 
 9. **Region Snipping & Full Screenshots**:
@@ -92,7 +92,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 14. **Temporary Whiteboard & Blackboard Mode (`K` or `Alt + B`)**:
     - **Multi-Monitor Display Targeting**: Left-click the Whiteboard button on the toolbar to open a Fluent modal flyout where you can choose backdrop styles (`Transparent`, `Whiteboard`, `Blackboard`) and target displays (`Active Screen (Follows Cursor)`, specific monitor `Screen 1`, `Screen 2`, or `All Screens`).
     - **Live Reference Screen**: On multi-monitor setups, isolate your whiteboard/blackboard to a single monitor while keeping your other monitors 100% transparent live desktop for reference documents, IDEs, or communication apps.
-    - **Full Snapshot & Snip Support**: Captures solid background and all ink strokes when taking snapshots (`Ctrl + S`) or snips (`Ctrl + Shift + S`).
+    - **Full Snapshot & Snip Support**: Captures solid background and all ink strokes when taking snapshots (`Ctrl + S`) or snips (`S` key).
     - **Smart Contextual Grids**: Automatically adapts grid line colors (dark charcoal on white paper, vibrant cyan on dark slate).
 
 ---
@@ -126,7 +126,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **Ctrl + S** | Take Full Screen Snapshot & Copy to Clipboard |
 | **[** / **]** | Decrease / Increase Brush Size (or Laser Trail) |
 | **0** / **Ctrl + 0** | Reset Canvas Zoom & Pan |
-| **1 - 4** | Select Preset Colors (Red, Blue, Green, Yellow) |
+| **1 - 4** | Select Preset Colors (Crimson Red, Tangelo Orange, Amber Gold, Sun Yellow) |
 | **5** | Open Custom Color & Opacity Studio |
 
 ---

@@ -88,6 +88,12 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
     - **Crosshair Style**: Displays a crisp, dual-contrast precision crosshair with configurable arm size (8px to 32px) and an active color center indicator.
     - **Live Brush Style**: Displays the exact footprint and diameter of your active brush or highlighter with real-time color fill and dual-contrast outline.
 
+14. **Temporary Whiteboard & Blackboard Mode (`K` or `Alt + B`)**:
+    - **Multi-Monitor Display Targeting**: Left-click the Whiteboard button on the toolbar to open a Fluent modal flyout where you can choose backdrop styles (`Transparent`, `Whiteboard`, `Blackboard`) and target displays (`Active Screen (Follows Cursor)`, specific monitor `Screen 1`, `Screen 2`, or `All Screens`).
+    - **Live Reference Screen**: On multi-monitor setups, isolate your whiteboard/blackboard to a single monitor while keeping your other monitors 100% transparent live desktop for reference documents, IDEs, or communication apps.
+    - **Full Snapshot & Snip Support**: Captures solid background and all ink strokes when taking snapshots (`Ctrl + S`) or snips (`Ctrl + Shift + S`).
+    - **Smart Contextual Grids**: Automatically adapts grid line colors (dark charcoal on white paper, vibrant cyan on dark slate).
+
 ---
 
 ## Keyboard Shortcuts Reference
@@ -107,6 +113,7 @@ A complete, zero-bloat, hardware-accelerated screen annotation and drawing suite
 | **T** | Triangle Shape |
 | **P** | Pan Canvas Mode |
 | **M** | Pointer (Click-Through) Mode |
+| **K** / **Alt + B** | Cycle Canvas Backdrop (Transparent → Whiteboard → Blackboard) |
 | **G** | Toggle Grid Overlay Flyout |
 | **B** | Collapse / Expand Toolbar Pill |
 | **Ctrl + Shift + B** | Reset Toolbar Position to Primary Screen Center |

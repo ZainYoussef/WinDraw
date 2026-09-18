@@ -1934,7 +1934,7 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
                               (g_cursorX >= g_toolbarRect.left && g_cursorX <= g_toolbarRect.right &&
                                g_cursorY >= g_toolbarRect.top && g_cursorY <= g_toolbarRect.bottom));
 
-        float pillR = (g_toolbarRect.bottom - g_toolbarRect.top) * 0.5f; // 15.0f (fully rounded capsule)
+        float pillR = (float)g_settings.cornerRadius;
         D2D1_ROUNDED_RECT pillRoundRect = D2D1::RoundedRect(g_toolbarRect, pillR, pillR);
 
         // Fill frosted dark acrylic
@@ -1952,8 +1952,8 @@ void DrawToolbar(ID2D1HwndRenderTarget* pRT) {
         // Specular top rim highlight
         if (pRimBrush) {
             pRT->DrawLine(
-                D2D1::Point2F(g_toolbarRect.left + pillR, g_toolbarRect.top + 1.2f),
-                D2D1::Point2F(g_toolbarRect.right - pillR, g_toolbarRect.top + 1.2f),
+                D2D1::Point2F(g_toolbarRect.left + pillR + 2.0f, g_toolbarRect.top + 1.2f),
+                D2D1::Point2F(g_toolbarRect.right - pillR - 2.0f, g_toolbarRect.top + 1.2f),
                 pRimBrush, 1.0f
             );
         }
